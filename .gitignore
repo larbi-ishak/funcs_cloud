@@ -1,8 +1,36 @@
-node_modules
+# Dependencies
+node_modules/
+
+# Environment files
 .env
-logs
+.env.local
+.env.*.local
+
+# Logs
+logs/
+*.log
 npm-debug.log*
-.log
-.db 
-.sqlite
-.sql
+
+# Database files
+*.db
+*.sqlite
+*.sqlite3
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Build output
+dist/
+build/
+out/
+
+# Temp files
+tmp/
+*.tmp

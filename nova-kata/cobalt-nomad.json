@@ -1,0 +1,13 @@
+{
+  "type": "service_account",
+  "project_id": "cobalt-nomad-370219",
+  "private_key_id": "efafeeb9c6dfacc56c71478d16b5bebbfcdb885f",
+  "private_key": "-----BEGIN PRIVATE KEY-----\nMIIEvgIBADANBgkqhkiG9w0BAQEFAASCBKgwggSkAgEAAoIBAQCyy9CZ5SUgOP/J\nlqFWOm2mXTTa2BHmqYEhtvr2X16xKSxZKyMPuf3Leip1tc+mnYIKRjv4moZ8TVAD\n0XT92+f49UB5VC8EIztOvr8RH2r1NltzGMRh6KF9O1z1EtTCw8ewczN8dgHTj3cC\n52t2E/X9nmfVasO47slkFSJI/n2lTyME4Fabz8wjutwaJ+iRvShXJSSh9tzNU6wx\nCqGDBlj4Tw8vs4ujGhMwwNleFil1B+cEt2W6yBEeEEiBc+sb8NirFOyRYPL2m2P9\nHrOnBGfmHvr6mtjPX9EDcDA1uX7wPI5TMc2Zl9EyOzBEy/KQEN4r9L7XkE6dPuPj\n+qdlSX9lAgMBAAECggEAR2L+Hjvx10w6wIuuTgXVGsvzGv+TIiQCZWowCGdqoNR+\nGvoQrSpHDVNxGX9mcbFIpv6E2k0kLgQWUvfxvJvtIicVv3ufrAi/GMEq+1SueUpj\nN/CnFCp0M9KcWlNS9JKDq81LPMHHF+ebjmLEsqfkmwcAkSLoE3HvodCYWEmX9ASa\nGL0Tva5YwVYUUYPbNzhapRixdh3kYZ4uKERCPgGoEdYEbdrZ4rM0JWKbNZTOMhw0\nbeIXj6v5Yt0U9vlbubA3dYi67Cs/Bqf4iq44UnRPJ2OePIlAfIOLbkvy0AKxB1nV\n5TlsS+q1YpqfhA0WORD9dlZkODdqjc17K1iYiReqXwKBgQDj87rcy4l5muWBeoSX\ncr8Kdlbd9B48MnkRTgJOcEpTmv1X4ERye+syCyk8KOE5PcbkFsiEy4ShuM3ENraI\nA3ELO4r5i7FKy6tCft8dWyyxhW060MP7790p759XI5nrOT0+rkkMVBouRnDdPa3r\nWkC5TeJ+DDbit1oqAa983Wrc8wKBgQDIy7iQ63APN6MJMxBXiw49wheQUQRSDFUI\nd6yQoN2CVswysPfFe+rK7rqR0qmOEs51/0nxq+7Z70BlOpHD8S9OqdyB/9G9n7gD\n/9LLZj88SFXtJX7cJsInK2FsLQmoHO7VUgox3I7J8ILDAM+SU0EiJjsfhQOuXXAO\n4TwB/G7oRwKBgQClG4u0k2RvBUfJAeH6BG3leROwTjp8JZ7VbuhywhjD99YaiWFq\nfuE7bSQf5AhGOr3NxcbVkMfvj3jS70JEwCFoHmeqGol/AIh6cITQsZJsvpUAbegW\nmoVZ86s5JZs96ka3GOvmFyCjdfgX9636c3PABG7SF6zFiEKxfGkMix/1CwKBgQCN\n3yrz8fXGOrhOCq9UO2L/jcCabjPQSPhXuD7MHW0E55D1jAY0mX5mjdBysdatFGqe\nApdbUvC7OQlVvNE7EZEsUmYD0B2AjnY1FS76Ga86R522phSBNj1d8Y+vIA8/odm6\nDXI4kq6szeuGHm+K4poVp8+EULYuH8TKLqf4e0RdhwKBgDQ/JTpcpQBOTKuBFAL1\n8TiNCOhBJ0dSaAq5lfOvYNr90pkOZR4WsNj4o8Z8zZ51KVxZvJlskz0vhhEBJ9sJ\nkP8xB/s5MnhW/Kn/m+uX+h8cotMP5gi8jklUwMEdOMLXz84l934IblHaE7KVISHg\ndYP/Vwqfd+DBYDcUyGnd5Tlm\n-----END PRIVATE KEY-----\n",
+  "client_email": "nova-bot@cobalt-nomad-370219.iam.gserviceaccount.com",
+  "client_id": "110122558109087631930",
+  "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+  "token_uri": "https://oauth2.googleapis.com/token",
+  "auth_provider_x509_cert_url": "https://www.googleapis.com/oauth2/v1/certs",
+  "client_x509_cert_url": "https://www.googleapis.com/robot/v1/metadata/x509/nova-bot%40cobalt-nomad-370219.iam.gserviceaccount.com",
+  "universe_domain": "googleapis.com"
+}

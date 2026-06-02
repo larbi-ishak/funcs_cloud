@@ -1,0 +1,24 @@
+{
+  "name": "nova-kata",
+  "version": "1.0.0",
+  "description": "Placement Service — Worker VM & Container manager using containerd/nerdctl + Kata Containers (QEMU)",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js",
+    "dev": "nodemon src/index.js"
+  },
+  "dependencies": {
+    "@google-cloud/compute": "^6.9.1",
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2",
+    "multer": "^2.1.1",
+    "node-cron": "^3.0.3",
+    "sql.js": "^1.12.0",
+    "ssh2": "^1.15.0",
+    "uuid": "^9.0.0",
+    "winston": "^3.13.0"
+  },
+  "devDependencies": {
+    "nodemon": "^3.1.3"
+  }
+}

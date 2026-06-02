@@ -1,0 +1,7 @@
+{
+  "name": "nova-nodejs-test",
+  "version": "1.0.0",
+  "description": "A test Node.js function for Nova",
+  "main": "handler.js",
+  "dependencies": {}
+}

@@ -1,8 +1,0 @@
-node_modules
-.env
-logs
-npm-debug.log*
-.log
-.db 
-.sqlite
-.sql
