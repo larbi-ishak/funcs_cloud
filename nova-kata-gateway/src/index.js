@@ -3,7 +3,8 @@ import 'dotenv/config';
 import express from 'express';
 import { v4 as uuidv4 } from 'uuid';
 
-import { initDb } from './db/database.js';
+import { initDb, functions as functionsDb } from './db/database.js';
+import cache from './cache/cache.js';
 import parseHost from './middleware/parseHost.js';
 import existenceCheck from './middleware/existenceCheck.js';
 import authCheck from './middleware/authCheck.js';
@@ -11,13 +12,13 @@ import containerStateCheck from './middleware/containerStateCheck.js';
 import forwardRequest from './proxy/forwardRequest.js';
 import internalRoutes from './routes/internal.js';
 import logger from './utils/logger.js';
-import { logTiming } from './utils/timingLogger.js';
 
 // Global request ID + start-time middleware
 const injectRequestId = (req, res, next) => {
     req.requestId = uuidv4();
     req.startTime = performance.now();
-    logTiming(req.requestId, 'request_received', 0, { method: req.method, url: req.url, host: req.headers.host });
+    req.log = logger.child({ requestId: req.requestId });
+    req.log.info({ elapsed_ms: 0, method: req.method, url: req.url, host: req.headers.host }, 'request_received');
     next();
 };
 
@@ -57,7 +58,7 @@ publicApp.use(forwardRequest);
 
 // Global Error Handler
 publicApp.use((err, req, res, next) => {
-    logger.error(`Public Unhandled error: ${err.message}`, { stack: err.stack });
+    logger.error({ stack: err.stack }, `Public Unhandled error: ${err.message}`);
     res.status(500).json({ error: 'Internal server error' });
 });
 
@@ -70,7 +71,7 @@ internalApp.use(wrapResponse);
 internalApp.use('/internal', internalRoutes);
 
 internalApp.use((err, req, res, next) => {
-    logger.error(`Internal Unhandled error: ${err.message}`, { stack: err.stack });
+    logger.error({ stack: err.stack }, `Internal Unhandled error: ${err.message}`);
     res.status(500).json({ error: 'Internal server error' });
 });
 
@@ -86,12 +87,26 @@ const INTERNAL_PORT = parseInt(process.env.INTERNAL_PORT) || 3003;
         process.exit(1);
     }
 
+    // ── Pre-warm function cache ────────────────────────────────────────────
+    // Load all functions into cache on startup so first requests are cache hits.
+    try {
+        const FUNCTION_CACHE_TTL = parseInt(process.env.FUNCTION_CACHE_TTL) || 3600;
+        const allFunctions = functionsDb.findAll();
+        for (const fn of allFunctions) {
+            await cache.set(`fn:${fn.name}`, fn, FUNCTION_CACHE_TTL);
+        }
+        logger.info(`Pre-warmed cache with ${allFunctions.length} functions`);
+    } catch (err) {
+        logger.warn(`Failed to pre-warm function cache: ${err.message}`);
+        // Non-fatal — first requests will just be cache misses
+    }
+
     const publicServer = publicApp.listen(GATEWAY_PORT, '0.0.0.0', () => {
-        logger.info(`🌐 Nova Kata Gateway (Public) listening on 0.0.0.0:${GATEWAY_PORT}`);
+        logger.info(`Nova Kata Gateway (Public) listening on 0.0.0.0:${GATEWAY_PORT}`);
     });
 
     const internalServer = internalApp.listen(INTERNAL_PORT, '127.0.0.1', () => {
-        logger.info(`🔒 Nova Kata Gateway (Internal) listening on 127.0.0.1:${INTERNAL_PORT}`);
+        logger.info(`Nova Kata Gateway (Internal) listening on 127.0.0.1:${INTERNAL_PORT}`);
     });
 
     const shutdown = () => {

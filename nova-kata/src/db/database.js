@@ -1,4 +1,4 @@
-const initSqlJs = require('sql.js');
+const Database = require('better-sqlite3');
 const path = require('path');
 const fs = require('fs');
 const logger = require('../utils/logger');
@@ -7,66 +7,53 @@ const DB_PATH = process.env.DB_PATH || './data/nova-kata.db';
 const SCHEMA_PATH = path.join(__dirname, 'schema.sql');
 
 let db;
-let SQL;
 
 function getDb() {
     if (!db) throw new Error('Database not initialised. Call initDb() first.');
     return db;
 }
 
-/** Flush in-memory DB to disk. Called after every write. */
-function persist() {
-    const data = db.export();
-    const buffer = Buffer.from(data);
-    const absPath = path.resolve(DB_PATH);
-    fs.writeFileSync(absPath, buffer);
-}
-
-async function initDb() {
+function initDb() {
     const dbDir = path.dirname(path.resolve(DB_PATH));
     if (!fs.existsSync(dbDir)) fs.mkdirSync(dbDir, { recursive: true });
 
-    SQL = await initSqlJs();
-
     const absPath = path.resolve(DB_PATH);
-    if (fs.existsSync(absPath)) {
-        const fileBuffer = fs.readFileSync(absPath);
-        db = new SQL.Database(fileBuffer);
-        logger.info(`SQLite database loaded from ${absPath}`);
-    } else {
-        db = new SQL.Database();
-        logger.info(`SQLite database created at ${absPath}`);
-    }
+    const exists = fs.existsSync(absPath);
 
-    db.run('PRAGMA foreign_keys = ON;');
+    db = new Database(absPath);
+    logger.info(`SQLite database ${exists ? 'loaded' : 'created'} from ${absPath}`);
+
+    // WAL mode — allows concurrent reads from the gateway while this process writes
+    db.pragma('journal_mode = WAL');
+    db.pragma('foreign_keys = ON');
 
     const schema = fs.readFileSync(SCHEMA_PATH, 'utf8');
-    db.run(schema);
+    db.exec(schema);
 
     // Run auto-migrations
     try {
-        db.run('ALTER TABLE functions ADD COLUMN memory_limit INTEGER DEFAULT 512;');
+        db.exec('ALTER TABLE functions ADD COLUMN memory_limit INTEGER DEFAULT 512;');
         logger.info('Migration: Added memory_limit to functions table');
     } catch (e) {}
     try {
-        db.run('ALTER TABLE functions ADD COLUMN cpu_limit REAL DEFAULT 1.0;');
+        db.exec('ALTER TABLE functions ADD COLUMN cpu_limit REAL DEFAULT 1.0;');
         logger.info('Migration: Added cpu_limit to functions table');
     } catch (e) {}
     try {
-        db.run('ALTER TABLE functions ADD COLUMN storage_limit INTEGER DEFAULT 512;');
+        db.exec('ALTER TABLE functions ADD COLUMN storage_limit INTEGER DEFAULT 512;');
         logger.info('Migration: Added storage_limit to functions table');
     } catch (e) {}
     try {
-        db.run('ALTER TABLE functions ADD COLUMN max_containers INTEGER DEFAULT 10;');
+        db.exec('ALTER TABLE functions ADD COLUMN max_containers INTEGER DEFAULT 10;');
         logger.info('Migration: Added max_containers to functions table');
     } catch (e) {}
     try {
-        db.run('ALTER TABLE functions ADD COLUMN warm_count INTEGER DEFAULT 1;');
+        db.exec('ALTER TABLE functions ADD COLUMN warm_count INTEGER DEFAULT 1;');
         logger.info('Migration: Added warm_count to functions table');
     } catch (e) {}
 
     try {
-        db.run(`
+        db.exec(`
             CREATE TABLE IF NOT EXISTS invocations (
                 id TEXT PRIMARY KEY,
                 function_id TEXT NOT NULL,
@@ -83,39 +70,49 @@ async function initDb() {
 
     // GCP auto-scaling metadata
     try {
-        db.run('ALTER TABLE workers ADD COLUMN gcp_instance_name TEXT;');
+        db.exec('ALTER TABLE workers ADD COLUMN gcp_instance_name TEXT;');
         logger.info('Migration: Added gcp_instance_name to workers table');
     } catch (e) {}
     try {
-        db.run('ALTER TABLE workers ADD COLUMN gcp_zone TEXT;');
+        db.exec('ALTER TABLE workers ADD COLUMN gcp_zone TEXT;');
         logger.info('Migration: Added gcp_zone to workers table');
     } catch (e) {}
 
-    persist();
+    // Fix legacy image tags: prepend localhost:5000/ to images missing a registry prefix
+    try {
+        const legacyImages = queryAll(
+            "SELECT id, image FROM functions WHERE image IS NOT NULL AND image NOT LIKE '%/%'"
+        );
+        if (legacyImages.length > 0) {
+            const updateStmt = db.prepare('UPDATE functions SET image = ? WHERE id = ?');
+            const updateMany = db.transaction((rows) => {
+                for (const row of rows) {
+                    updateStmt.run(`localhost:5000/${row.image}`, row.id);
+                }
+            });
+            updateMany(legacyImages);
+            logger.info(`Migration: Updated ${legacyImages.length} function(s) with registry-prefixed image tags`);
+        }
+    } catch (e) {
+        logger.warn(`Migration: Failed to update legacy image tags: ${e.message}`);
+    }
+
     return db;
 }
 
 // ─── Query helpers ────────────────────────────────────────────────────────────
+// better-sqlite3 reads/writes directly to the file — no persist() or reloadDb() needed.
 
 function queryAll(sql, params = []) {
-    const stmt = db.prepare(sql);
-    stmt.bind(params);
-    const rows = [];
-    while (stmt.step()) {
-        rows.push(stmt.getAsObject());
-    }
-    stmt.free();
-    return rows;
+    return db.prepare(sql).all(...params);
 }
 
 function queryOne(sql, params = []) {
-    const results = queryAll(sql, params);
-    return results[0] || null;
+    return db.prepare(sql).get(...params);
 }
 
 function run(sql, params = []) {
-    db.run(sql, params);
-    persist();
+    db.prepare(sql).run(...params);
 }
 
 function namedToPositional(sql, obj) {
@@ -253,6 +250,10 @@ const containers = {
     delete(id) {
         run('DELETE FROM containers WHERE id = ?', [id]);
     },
+
+    removeByWorkerId(workerId) {
+        run('DELETE FROM containers WHERE worker_id = ?', [workerId]);
+    },
 };
 
 // ─── warm pool ────────────────────────────────────────────────────────────────
@@ -348,6 +349,10 @@ const warmPool = {
 
     removeByFunctionId(functionId) {
         run('DELETE FROM warm_pool WHERE function_id = ?', [functionId]);
+    },
+
+    removeByWorkerId(workerId) {
+        run('DELETE FROM warm_pool WHERE worker_id = ?', [workerId]);
     },
 };
 

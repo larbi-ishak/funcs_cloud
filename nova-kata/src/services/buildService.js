@@ -261,7 +261,7 @@ async function buildFunctionImage(worker, opts, onLogArg) {
     const { name, runtime, entryPoint, requirementsFile, files } = opts;
     // onLog can come as 3rd positional arg (how deploy.js calls it) or inside opts
     const onLog = onLogArg || opts.onLog || (() => {});
-    const tag      = `nova-fn-${name}:latest`;
+    const tag      = `localhost:5000/nova-fn-${name}:latest`;
     const buildDir = `/opt/nova/build/${name}`;
 
     onLog(`🖥️  Using worker ${worker.ip} for build`, 'step');
@@ -344,6 +344,16 @@ async function buildFunctionImage(worker, opts, onLogArg) {
         }
         onLog(`✅ Image ${tag} ready!`, 'step');
 
+        // ── 8. Push to local registry so other workers can pull ────────────────
+        onLog(`📤 Pushing ${tag} to local registry...`, 'step');
+        try {
+            await sshRun(ssh, `nerdctl push ${tag} 2>&1`, onLog);
+            onLog(`✅ Image pushed to registry`, 'step');
+        } catch (pushErr) {
+            onLog(`⚠️  Push failed (image only available on this worker): ${pushErr.message}`, 'warn');
+            logger.warn(`Push to registry failed for ${tag}: ${pushErr.message}`);
+        }
+
         return { image: tag };
 
     } finally {
@@ -360,7 +370,7 @@ async function buildFunctionImage(worker, opts, onLogArg) {
  * @param {string[]} containerNames - list of container names to stop/remove
  */
 async function deleteFunctionResources(worker, funcName, containerNames = []) {
-    const tag      = `nova-fn-${funcName}:latest`;
+    const tag      = `localhost:5000/nova-fn-${funcName}:latest`;
     const buildDir = `/opt/nova/build/${funcName}`;
 
     const ssh = await createSSHClient({

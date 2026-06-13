@@ -3,7 +3,7 @@ const router = express.Router();
 
 const { initWorker, checkWorkerHealth, retireWorker, InitError } = require('../services/workerService');
 const { provisionWorker, ProvisionError } = require('../services/provisionService');
-const { workers, events } = require('../db/database');
+const { workers, containers, warmPool, events } = require('../db/database');
 const logger = require('../utils/logger');
 
 // ─── POST /init ───────────────────────────────────────────────────────────────
@@ -169,9 +169,15 @@ router.delete('/workers/:id', (req, res) => {
     const worker = workers.findById(req.params.id);
     if (!worker) return res.status(404).json({ error: 'Worker not found' });
 
+    // Cascade: remove warm pool entries and containers for this worker
+    const workerContainers = containers.findByWorker(req.params.id);
+    warmPool.removeByWorkerId(req.params.id);
+    containers.removeByWorkerId(req.params.id);
+    logger.info(`Worker ${req.params.id}: cleaned up ${workerContainers.length} container(s) and warm pool entries`);
+
     workers.delete(req.params.id);
     logger.info(`Worker ${req.params.id} deleted`);
-    return res.json({ success: true });
+    return res.json({ success: true, containers_removed: workerContainers.length });
 });
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────

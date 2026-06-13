@@ -34,7 +34,7 @@ async function launchContainer(workerId, options = {}) {
     const rid = containerId.slice(0, 8);
     const logPrefix = `Container[${rid}] on worker ${worker.ip}`;
 
-    const image = options.image || DEFAULT_IMAGE;
+    const image = resolveImageTag(options.image || DEFAULT_IMAGE);
     const runtime = options.runtime || DEFAULT_RUNTIME;
     const agentCmd = options.agent_cmd || DEFAULT_AGENT_CMD;
     const agentPort = options.agent_port || DEFAULT_AGENT_PORT;
@@ -85,7 +85,9 @@ set -euo pipefail
 # ── 1. Run container with Kata QEMU runtime ──────────────────────────────────
 # Note: no command is passed — the image's CMD is used directly.
 # This avoids the ENTRYPOINT+args confusion when cached images have stale entrypoints.
+# --pull missing: use local cache if available, otherwise pull from registry (localhost:5000)
 nerdctl run \\
+  --pull missing \\
   --runtime ${runtime} \\
   --snapshotter ${DEFAULT_SNAPSHOTTER} \\
   ${memoryLimit} \\
@@ -343,6 +345,19 @@ echo '{"status":"stopped"}'
 
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
+
+/**
+ * Resolve an image tag, auto-prepending the local registry prefix
+ * for legacy tags that don't include a registry (e.g. "nova-fn-node-js:latest").
+ * Images with a '/' are assumed to already include a registry/host.
+ */
+function resolveImageTag(image) {
+    if (!image) return DEFAULT_IMAGE;
+    if (image.includes('/')) return image;  // already has registry prefix
+    const resolved = `localhost:5000/${image}`;
+    logger.debug(`Image tag resolved: ${image} → ${resolved}`);
+    return resolved;
+}
 
 function allocatePoolIndex(workerId) {
     const activeContainers = containers.findByWorker(workerId);

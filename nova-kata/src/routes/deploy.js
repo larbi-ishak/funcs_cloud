@@ -91,7 +91,7 @@ router.post('/functions/deploy', upload.array('files'), async (req, res) => {
         log(`🖥️  Using worker ${worker.ip} for build`, 'step');
 
         // ── 2. Build the image ────────────────────────────────────────────────
-        const image = `nova-fn-${functionName}:latest`;
+        const image = `localhost:5000/nova-fn-${functionName}:latest`;
         let buildResult;
         try {
             // multer may strip directory from originalname (security feature).

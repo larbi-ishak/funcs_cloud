@@ -1,6 +1,5 @@
 import { createProxyMiddleware } from 'http-proxy-middleware';
 import logger from '../utils/logger.js';
-import { logTiming } from '../utils/timingLogger.js';
 import axios from 'axios';
 
 const proxyMiddleware = createProxyMiddleware({
@@ -15,18 +14,20 @@ const proxyMiddleware = createProxyMiddleware({
             if (req.requestId) {
                 proxyReq.setHeader('X-Nova-Request-Id', req.requestId);
             }
-            logTiming(req.requestId, 'proxy_request_sent', performance.now() - req.startTime, {
+            req.log.info({
+                elapsed_ms: +(performance.now() - req.startTime).toFixed(2),
                 vmTarget: req.vmTarget,
                 method: req.method,
                 url: req.url,
-            });
+            }, 'proxy_request_sent');
         },
         proxyRes: (proxyRes, req, res) => {
             const elapsed = performance.now() - req.startTime;
-            logTiming(req.requestId, 'proxy_response_received', elapsed, {
+            req.log.info({
+                elapsed_ms: +elapsed.toFixed(2),
                 vmTarget: req.vmTarget,
                 statusCode: proxyRes.statusCode,
-            });
+            }, 'proxy_response_received');
             // Log invocation asynchronously
             if (req.functionData && req.containerId) {
                 const PLACEMENT_URL = process.env.PLACEMENT_SERVICE_URL || 'http://localhost:3002';
@@ -37,16 +38,17 @@ const proxyMiddleware = createProxyMiddleware({
                     latency_ms: Math.round(elapsed),
                     request_method: req.method,
                     request_path: req.url
-                }).catch(err => logger.error(`Failed to log invocation: ${err.message}`));
+                }).catch(err => logger.error({ err }, 'Failed to log invocation'));
             }
         },
         error: (err, req, res) => {
-            logTiming(req.requestId, 'proxy_error', performance.now() - req.startTime, {
+            req.log.info({
+                elapsed_ms: +(performance.now() - req.startTime).toFixed(2),
                 vmTarget: req.vmTarget,
                 error: err.message,
                 errorCode: err.code,
-            });
-            logger.error(`Proxy Error: ${err.message}`);
+            }, 'proxy_error');
+            logger.error({ err }, 'Proxy Error');
             if (!res.headersSent) {
                 res.status(502).json({ error: "bad gateway" });
             }

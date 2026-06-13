@@ -1,6 +1,6 @@
 const { v4: uuidv4 } = require('uuid');
 const { createSSHClient } = require('../utils/ssh');
-const { workers, events } = require('../db/database');
+const { workers, containers, warmPool, events } = require('../db/database');
 const logger = require('../utils/logger');
 
 /**
@@ -152,6 +152,9 @@ async function checkWorkerHealth(workerId) {
         if (fresh.consecutive_failures >= maxFails) {
             newStatus = 'faulty';
             logger.warn(`Worker ${workerId} (${worker.ip}) marked FAULTY after ${fresh.consecutive_failures} failures`);
+            // Clean up warm pool entries for this worker — containers are unreachable
+            warmPool.removeByWorkerId(workerId);
+            logger.info(`Worker ${workerId}: cleaned up warm pool entries (worker faulty)`);
         }
         workers.updateStatus(workerId, newStatus);
         events.insert({ worker_id: workerId, event_type: 'health_fail', message: err.message });
@@ -169,14 +172,19 @@ function retireWorker(workerId, { remove = false } = {}) {
     const worker = workers.findById(workerId);
     if (!worker) throw new Error(`Worker ${workerId} not found`);
 
+    // Always clean up warm pool entries for retired workers
+    warmPool.removeByWorkerId(workerId);
+
     workers.updateStatus(workerId, 'retired');
     events.insert({ worker_id: workerId, event_type: 'retired', message: 'Manually retired' });
 
     if (remove) {
+        // Cascade: remove containers for this worker
+        containers.removeByWorkerId(workerId);
         workers.delete(workerId);
-        logger.info(`Worker ${workerId} deleted`);
+        logger.info(`Worker ${workerId} deleted (warm pool + containers cleaned up)`);
     } else {
-        logger.info(`Worker ${workerId} retired`);
+        logger.info(`Worker ${workerId} retired (warm pool cleaned up)`);
     }
 }
 

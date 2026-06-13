@@ -23,23 +23,32 @@ async function claimWarmContainer(functionId) {
     if (warmEntry) {
         logger.info(`Warm pool: claimed container ${warmEntry.container_id} for function ${functionId || 'generic'}`);
 
-        // Unpause it
-        const container = await unpauseContainer(warmEntry.container_id);
+        // Unpause it — if the worker is gone, discard the stale entry and fall through to cold start
+        try {
+            const container = await unpauseContainer(warmEntry.container_id);
 
-        // Trigger background replenishment (non-blocking)
-        setImmediate(() => replenishPool(functionId).catch(err => {
-            logger.error(`Warm pool replenish failed: ${err.message}`);
-        }));
+            // Trigger background replenishment (non-blocking)
+            setImmediate(() => replenishPool(functionId).catch(err => {
+                logger.error(`Warm pool replenish failed: ${err.message}`);
+            }));
 
-        return {
-            container_id: container.id,
-            container_name: container.container_name,
-            container_ip: container.container_ip,
-            host_ip: _getHostIp(container),
-            host_port: container.host_port,
-            agent_port: container.agent_port,
-            source: 'warm_pool',
-        };
+            return {
+                container_id: container.id,
+                container_name: container.container_name,
+                container_ip: container.container_ip,
+                host_ip: _getHostIp(container),
+                host_port: container.host_port,
+                agent_port: container.agent_port,
+                source: 'warm_pool',
+            };
+        } catch (err) {
+            logger.warn(`Warm pool: container ${warmEntry.container_id} unusable (${err.message}) — discarding and cold starting`);
+            // Clean up the stale warm pool entry and container record
+            warmPool.deleteByContainer(warmEntry.container_id);
+            const staleContainer = containers.findById(warmEntry.container_id);
+            if (staleContainer) containers.updateStatus(warmEntry.container_id, 'failed');
+            // Fall through to cold start below
+        }
     }
 
     // ── No warm container available -> cold start ────────────────────────────

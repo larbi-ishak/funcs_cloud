@@ -1,5 +1,3 @@
-import { logTiming } from '../utils/timingLogger.js';
-
 /**
  * Resolves the target function name from the incoming request.
  *
@@ -27,11 +25,12 @@ function parseHost(req, res, next) {
         // Rewrite URL so the upstream container sees / instead of /fn/<name>/
         req.url = pathMatch[2] || '/';
 
-        logTiming(req.requestId, 'parseHost_done', performance.now() - req.startTime, {
+        req.log.info({
+            elapsed_ms: +(performance.now() - req.startTime).toFixed(2),
             mode:         'path',
             functionName: req.functionName,
             step_ms:      +(performance.now() - t0).toFixed(2),
-        });
+        }, 'parseHost_done');
         return next();
     }
 
@@ -45,12 +44,13 @@ function parseHost(req, res, next) {
         req.functionName = parts[0].toLowerCase();
         req.region       = parts.slice(1).join('.');
 
-        logTiming(req.requestId, 'parseHost_done', performance.now() - req.startTime, {
+        req.log.info({
+            elapsed_ms: +(performance.now() - req.startTime).toFixed(2),
             mode:         'subdomain',
             functionName: req.functionName,
             region:       req.region,
             step_ms:      +(performance.now() - t0).toFixed(2),
-        });
+        }, 'parseHost_done');
         return next();
     }
 
