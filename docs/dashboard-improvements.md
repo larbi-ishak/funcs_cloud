@@ -59,7 +59,12 @@ Added `FN_NAME_REGEX` client-side validation on deploy form with real-time feedb
 
 **Problem:** Anyone who can reach the dashboard URL has full admin access.
 
-**Status:** Next.js 16 deprecated `middleware.ts` in favor of `proxy.ts` with a new API. The middleware file was causing errors. Removed for now. Re-implement using Next.js 16 `proxy.ts` convention when auth is needed.
+**What happened:** Created `src/middleware.ts` with shared-secret auth via `DASHBOARD_AUTH_KEY` env var. However, **Next.js 16 deprecated `middleware.ts`** in favor of `proxy.ts` with a new API. This caused errors:
+```
+⚠ The "middleware" file convention is deprecated. Please use "proxy" instead.
+⨯ [Error: The Middleware file must export a function named `middleware` or a default function.]
+```
+The middleware file was deleted (`3a53d23`). Auth must be re-implemented using Next.js 16 `proxy.ts` convention.
 
 **PostgreSQL-ready:** Independent of DB driver. Can upgrade to session-based auth when PG migration happens.
 
