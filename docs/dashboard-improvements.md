@@ -55,11 +55,11 @@ Added `FN_NAME_REGEX` client-side validation on deploy form with real-time feedb
 
 ## 📋 Remaining Items (Documented)
 
-### 1. Dashboard Authentication ✅ Done
+### 1. Dashboard Authentication — Deferred
 
 **Problem:** Anyone who can reach the dashboard URL has full admin access.
 
-**Fix:** Added Next.js `middleware.ts` that checks for `X-Dashboard-Key` header or `dashboard_key` cookie against `DASHBOARD_AUTH_KEY` env var. Auth disabled if env var not set (local dev). Redirects to `/login` for browser requests, returns 401 for API calls.
+**Status:** Next.js 16 deprecated `middleware.ts` in favor of `proxy.ts` with a new API. The middleware file was causing errors. Removed for now. Re-implement using Next.js 16 `proxy.ts` convention when auth is needed.
 
 **PostgreSQL-ready:** Independent of DB driver. Can upgrade to session-based auth when PG migration happens.
 
@@ -182,7 +182,7 @@ Installed `sonner`. Added `<Toaster />` to root layout. Replaced `alert()` calls
 
 | # | Issue | Severity | Effort | Status |
 |---|---|---|---|---|
-| 1 | Dashboard authentication | 🔴 Critical | ~2h | ✅ Done |
+| 1 | Dashboard authentication | 🔴 Critical | ~2h | Deferred (Next.js 16 proxy) |
 | 2 | Env variables for API URLs | 🟡 Medium | ~1h | ✅ Done |
 | 3 | Input validation | 🟡 Medium | ~30min | ✅ Done |
 | 4 | Data caching (SWR) | 🟡 Medium | ~2h | ✅ Done |
