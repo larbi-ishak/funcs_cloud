@@ -94,58 +94,13 @@ Note: `/launch`, `/build`, `/exec`, `/write-file` still use `exec()` because the
 
 ---
 
-### 26. Ghost VM Infrastructure Leak in Auto-Scaler
+### 26. Ghost VM Infrastructure Leak in Auto-Scaler — ✅ Fixed
 **Severity:** 🔴 Critical
 **File:** `src/services/scalingService.js` — `scaleOut()`
 
-**Problem:** The `scaleOut()` function creates a GCP VM, then provisions it, then registers it in SQLite. If provisioning or registration fails (e.g., `apt-get update` fails, SSH drops, network timeout), the `finally` block only resets `scalingInProgress = false`. The GCP VM remains running forever but is never added to the database. The system has no record of it, so `scaleIn()` will never clean it up. This silently drains GCP billing.
+**Fix applied — Compensation Pattern:** Track `gcpInstance` after Phase 1. If any subsequent phase fails, delete the orphaned VM in the `catch` block. Also records `scale_failed` event in DB.
 
-**Execution flow:**
-```js
-// Phase 1: Creates the VM on GCP — $$$ billed from this point
-const { ip, zone } = await createInstance({ region, instanceName, rootPassword });
-
-// Phase 2: Wait for SSH — if this times out, VM is orphaned
-await waitForSsh({ ip, ... });
-
-// Phase 3: Run Ansible provisioning — if this fails, VM is orphaned
-await provisionWorker({ ip, ... });
-
-// Phase 4: Register in DB — if this fails, VM is orphaned
-const worker = await initWorker({ ip, ... });
-
-// finally: only resets flag — does NOT clean up the VM
-finally { scalingInProgress = false; }
-```
-
-**Fix — State Rollback (Compensation Pattern):**
-```js
-let gcpInstance = null;
-try {
-    const { ip, zone } = await createInstance({ region, instanceName, rootPassword });
-    gcpInstance = { ip, zone, instanceName };  // Track what was created
-
-    await waitForSsh({ ip, ... });
-    await provisionWorker({ ip, ... });
-    const worker = await initWorker({ ip, ... });
-    workers.setGcpMeta(worker.id, { instanceName, zone });
-    // ...
-} catch (err) {
-    // CRITICAL: Clean up the orphaned VM if it was created but not registered
-    if (gcpInstance) {
-        logger.error(`[AutoScale] Scale-out failed — deleting orphaned VM ${gcpInstance.instanceName}...`);
-        await deleteInstance({ instanceName: gcpInstance.instanceName, zone: gcpInstance.zone })
-            .catch(e => logger.error(`[AutoScale] FATAL: Failed to delete ghost VM: ${e.message}`));
-    }
-    throw err;
-} finally {
-    scalingInProgress = false;
-}
-```
-
-**Additional safeguard:** Add a periodic "ghost VM scanner" that lists all GCP instances in the project and compares against the `workers` table. Any VM whose name matches `nova-worker-*` but isn't in the DB should be flagged or deleted.
-
-**Effort:** ~1h (rollback) + ~2h (ghost scanner)
+**scaleIn() also improved:** Stops containers on worker before deleting VM. If VM deletion fails, keeps worker as 'retired' in DB for manual cleanup. Records `scaled_in` and `scale_in_failed` events.
 
 ---
 

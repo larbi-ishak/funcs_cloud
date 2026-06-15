@@ -105,6 +105,8 @@ async function scaleOut({ region, onLine } = {}) {
         if (typeof onLine === 'function') onLine(line);
     };
 
+    let gcpInstance = null;  // Track for ghost VM rollback
+
     try {
         const instanceName = `nova-worker-${uuidv4().split('-')[0]}`;
         const { rootPassword, sshPort } = cfg();
@@ -116,6 +118,7 @@ async function scaleOut({ region, onLine } = {}) {
             instanceName,
             rootPassword,
         });
+        gcpInstance = { instanceName, zone };  // Mark VM as created for rollback
         log(`VM created. IP: ${ip}. Waiting for SSH to become ready...`);
 
         // ── Phase 2: Wait for SSH + sshd to be ready (startup script runs) ───
@@ -158,6 +161,26 @@ async function scaleOut({ region, onLine } = {}) {
 
         return { worker, instanceName, zone };
 
+    } catch (err) {
+        // ── Ghost VM rollback: delete orphaned VM if it was created but not registered ──
+        if (gcpInstance) {
+            logger.error(`[AutoScale] Scale-out failed — deleting orphaned VM ${gcpInstance.instanceName}...`);
+            try {
+                await deleteInstance({ instanceName: gcpInstance.instanceName, zone: gcpInstance.zone });
+                logger.info(`[AutoScale] Orphaned VM ${gcpInstance.instanceName} deleted`);
+            } catch (delErr) {
+                logger.error(`[AutoScale] FATAL: Failed to delete ghost VM ${gcpInstance.instanceName}: ${delErr.message}`);
+            }
+        }
+
+        // Record failure event in DB so dashboard can show it
+        events.insert({
+            worker_id  : null,
+            event_type : 'scale_failed',
+            message    : `Scale-out failed: ${err.message}${gcpInstance ? ` (VM rolled back)` : ' (no VM created)'}`,
+        });
+
+        throw err;
     } finally {
         scalingInProgress = false;
     }
@@ -182,9 +205,37 @@ async function scaleIn(workerId) {
     // Mark worker retired first so it stops receiving traffic
     workers.updateStatus(workerId, 'retired');
 
-    await deleteInstance({ instanceName: gcp_instance_name, zone: gcp_zone });
+    // Stop all containers on this worker before deleting VM
+    const workerContainers = containers.findByWorker(workerId);
+    for (const c of workerContainers) {
+        try {
+            containers.updateStatus(c.id, 'stopped');
+        } catch (_) {}
+    }
+    logger.info(`[AutoScale] Stopped ${workerContainers.length} containers on worker ${workerId}`);
+
+    // Delete the GCP VM — if this fails, don't remove from DB so we can retry
+    try {
+        await deleteInstance({ instanceName: gcp_instance_name, zone: gcp_zone });
+    } catch (err) {
+        // VM deletion failed — keep worker in DB as 'retired' for manual cleanup
+        logger.error(`[AutoScale] VM deletion failed for ${gcp_instance_name}: ${err.message}. Worker kept as 'retired' for manual cleanup.`);
+        events.insert({
+            worker_id  : workerId,
+            event_type : 'scale_in_failed',
+            message    : `VM deletion failed: ${err.message}. Manual cleanup needed for ${gcp_instance_name} in ${gcp_zone}.`,
+        });
+        throw err;
+    }
 
     workers.delete(workerId);
+
+    events.insert({
+        worker_id  : workerId,
+        event_type : 'scaled_in',
+        message    : `Worker scaled in. VM ${gcp_instance_name} deleted.`,
+    });
+
     logger.info(`[AutoScale] Worker ${workerId} removed and VM ${gcp_instance_name} deleted`);
 }
 
