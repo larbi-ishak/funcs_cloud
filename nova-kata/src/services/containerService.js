@@ -43,6 +43,17 @@ const DEFAULT_SNAPSHOTTER = process.env.DEFAULT_SNAPSHOTTER || 'overlayfs';
 const DEFAULT_AGENT_CMD = process.env.DEFAULT_AGENT_CMD || 'python3 /nova_agent.py';
 const DEFAULT_AGENT_PORT = parseInt(process.env.DEFAULT_AGENT_PORT) || 8080;
 
+// ── Shell injection prevention ────────────────────────────────────────────────
+// Env var keys must be valid shell identifiers
+const ENV_KEY_REGEX = /^[A-Za-z_][A-Za-z0-9_]*$/;
+// Only allow known-safe runtimes
+const ALLOWED_RUNTIMES = ['io.containerd.kata.v2', 'io.containerd.runc.v2'];
+
+/** Shell-escape a value: wrap in single quotes, escape embedded single quotes */
+function shellEscape(str) {
+    return `'${String(str).replace(/'/g, "'\\''")}'`;
+}
+
 /**
  * Launch a new container via nerdctl on a worker.
  *
@@ -104,10 +115,25 @@ async function launchContainer(workerId, options = {}) {
         started_at: new Date().toISOString(),
     });
 
+    // Validate runtime — only allow known-safe values
+    if (!ALLOWED_RUNTIMES.includes(runtime)) {
+        throw new Error(`Invalid runtime: ${runtime}. Allowed: ${ALLOWED_RUNTIMES.join(', ')}`);
+    }
+
+    // Validate numeric fields
+    if (options.memory_limit && (typeof options.memory_limit !== 'number' || options.memory_limit <= 0)) {
+        throw new Error('memory_limit must be a positive number');
+    }
+    if (options.cpu_limit && (typeof options.cpu_limit !== 'number' || options.cpu_limit <= 0)) {
+        throw new Error('cpu_limit must be a positive number');
+    }
+
+    // Build env flags with shell-escaped values and validated keys
     const envFlags = [`--env NOVA_PORT=${agentPort}`];
     if (envVars && typeof envVars === 'object') {
         for (const [k, v] of Object.entries(envVars)) {
-            envFlags.push(`--env ${k}=${v}`);
+            if (!ENV_KEY_REGEX.test(k)) throw new Error(`Invalid env key: ${k}`);
+            envFlags.push(`--env ${k}=${shellEscape(v)}`);
         }
     }
 

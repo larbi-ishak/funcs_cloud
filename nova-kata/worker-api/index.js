@@ -7,10 +7,11 @@
  * Auth: Shared API key via X-Worker-Key header.
  */
 const express = require('express');
-const { exec } = require('child_process');
+const { exec, execFile } = require('child_process');
 const crypto = require('crypto');
 const util = require('util');
 const execPromise = util.promisify(exec);
+const execFilePromise = util.promisify(execFile);
 
 const app = express();
 
@@ -61,8 +62,9 @@ app.post('/unpause', async (req, res) => {
     if (!CONTAINER_NAME_REGEX.test(container_name)) return res.status(400).json({ error: 'Invalid container_name' });
 
     try {
-        const { stdout, stderr } = await execPromise(
-            `nerdctl unpause ${container_name}`, { timeout: NERDCTL_TIMEOUT }
+        // execFile — no shell interpolation, safe from injection
+        const { stdout, stderr } = await execFilePromise(
+            'nerdctl', ['unpause', container_name], { timeout: NERDCTL_TIMEOUT }
         );
         res.json({ success: true, stdout: stdout.trim(), stderr: stderr.trim() });
     } catch (err) {
@@ -77,8 +79,9 @@ app.post('/pause', async (req, res) => {
     if (!CONTAINER_NAME_REGEX.test(container_name)) return res.status(400).json({ error: 'Invalid container_name' });
 
     try {
-        const { stdout, stderr } = await execPromise(
-            `nerdctl pause ${container_name}`, { timeout: NERDCTL_TIMEOUT }
+        // execFile — no shell interpolation, safe from injection
+        const { stdout, stderr } = await execFilePromise(
+            'nerdctl', ['pause', container_name], { timeout: NERDCTL_TIMEOUT }
         );
         res.json({ success: true, stdout: stdout.trim(), stderr: stderr.trim() });
     } catch (err) {
@@ -298,11 +301,11 @@ app.post('/stop', async (req, res) => {
     if (!CONTAINER_NAME_REGEX.test(container_name)) return res.status(400).json({ error: 'Invalid container_name' });
 
     try {
-        const { stdout, stderr } = await execPromise(
-            `nerdctl unpause ${container_name} 2>/dev/null; nerdctl stop ${container_name} 2>/dev/null; nerdctl rm -f ${container_name} 2>/dev/null; echo '{"status":"stopped"}'`,
-            { timeout: NERDCTL_TIMEOUT }
-        );
-        res.json({ success: true, stdout: stdout.trim(), stderr: stderr.trim() });
+        // execFile for each step — no shell interpolation
+        try { await execFilePromise('nerdctl', ['unpause', container_name], { timeout: NERDCTL_TIMEOUT }); } catch (_) {}
+        try { await execFilePromise('nerdctl', ['stop', container_name], { timeout: NERDCTL_TIMEOUT }); } catch (_) {}
+        try { await execFilePromise('nerdctl', ['rm', '-f', container_name], { timeout: NERDCTL_TIMEOUT }); } catch (_) {}
+        res.json({ success: true, stdout: '{"status":"stopped"}', stderr: '' });
     } catch (err) {
         // Even if some steps fail, the container may still be cleaned up
         res.json({ success: true, stdout: '', stderr: err.stderr?.trim() || err.message });
