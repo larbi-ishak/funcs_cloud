@@ -1,7 +1,14 @@
 "use client";
 
 import { useState, useRef, useEffect } from "react";
-import { UploadCloud, Rocket, Terminal as TerminalIcon, File as FileIcon, Folder, Trash2 } from "lucide-react";
+import { UploadCloud, Rocket, Terminal as TerminalIcon, File as FileIcon, Folder, Trash2, AlertCircle } from "lucide-react";
+
+const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:3002";
+
+// Image name validation regex (matches backend)
+const IMAGE_REGEX = /^(?:[a-zA-Z0-9._-]+(?::\d+)?\/)?[a-zA-Z0-9._-]+(?::[a-zA-Z0-9._-]+)?$/;
+// Function name: alphanumeric + hyphens only
+const FN_NAME_REGEX = /^[a-zA-Z][a-zA-Z0-9-]{0,62}$/;
 
 // Helper component for recursive file tree rendering
 const FileTreeNode = ({ name, node }: { name: string; node: any }) => {
@@ -78,6 +85,11 @@ export default function DeployPage() {
     e.preventDefault();
     if (files.length === 0) return alert("Select files to upload");
     if (!formData.name || !formData.entry_point) return alert("Missing required fields");
+    
+    // Validate function name
+    if (!FN_NAME_REGEX.test(formData.name)) {
+      return alert("Function name must start with a letter and contain only letters, numbers, and hyphens (max 63 chars).");
+    }
 
     setLoading(true);
     setLogs([]);
@@ -113,7 +125,7 @@ export default function DeployPage() {
     });
 
     try {
-      const response = await fetch("http://localhost:3002/functions/deploy", {
+      const response = await fetch(`${API_URL}/functions/deploy`, {
         method: "POST",
         body: data,
       });
@@ -244,11 +256,16 @@ export default function DeployPage() {
               <label className="block text-sm font-medium mb-2">Function Name</label>
               <input 
                 type="text" 
-                className="w-full bg-background border border-border rounded-md px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-primary/50" 
+                className={`w-full bg-background border rounded-md px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-primary/50 ${formData.name && !FN_NAME_REGEX.test(formData.name) ? 'border-red-500' : 'border-border'}`} 
                 placeholder="my-cool-api"
                 value={formData.name}
                 onChange={e => setFormData({...formData, name: e.target.value})}
               />
+              {formData.name && !FN_NAME_REGEX.test(formData.name) && (
+                <p className="text-xs text-red-500 mt-1 flex items-center gap-1">
+                  <AlertCircle size={12} /> Must start with a letter. Only letters, numbers, hyphens. Max 63 chars.
+                </p>
+              )}
             </div>
 
             <div className="grid grid-cols-3 gap-4">

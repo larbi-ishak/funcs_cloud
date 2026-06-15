@@ -59,7 +59,7 @@ const functions = {
 
 const apiKeys = {
     findByKey(key) {
-        return queryOne('SELECT * FROM api_keys WHERE key = ? AND status = "active"', [key]);
+        return queryOne("SELECT * FROM api_keys WHERE key = ? AND status = 'active'", [key]);
     },
     /**
      * Find an active API key that belongs to a specific function.
@@ -67,17 +67,27 @@ const apiKeys = {
      * More secure than findByKey + code check: doesn't leak key data for other functions.
      */
     findByKeyAndFunction(key, functionId) {
-        return queryOne('SELECT * FROM api_keys WHERE key = ? AND function_id = ? AND status = "active"', [key, functionId]);
+        return queryOne("SELECT * FROM api_keys WHERE key = ? AND function_id = ? AND status = 'active'", [key, functionId]);
     }
 };
 
 const containers = {
     /**
-     * Find a running container for the given function.
+     * Find a single running container for the given function.
      */
     findRunningByFunction(functionId) {
         return queryOne(
-            'SELECT * FROM containers WHERE function_id = ? AND status = "running" LIMIT 1',
+            "SELECT * FROM containers WHERE function_id = ? AND status = 'running' LIMIT 1",
+            [functionId]
+        );
+    },
+    /**
+     * Find ALL running containers for the given function.
+     * Used for round-robin pool routing — distributes traffic across multiple containers.
+     */
+    findAllRunningByFunction(functionId) {
+        return queryAll(
+            "SELECT * FROM containers WHERE function_id = ? AND status = 'running'",
             [functionId]
         );
     }

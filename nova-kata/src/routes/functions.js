@@ -1,8 +1,19 @@
 const express = require('express');
 const router = express.Router();
 const { v4: uuidv4 } = require('uuid');
-const { functions, apiKeys } = require('../db/database');
+const axios = require('axios');
+const http = require('http');
+const { functions, apiKeys, containers, workers } = require('../db/database');
 const logger = require('../utils/logger');
+
+// ── Worker API client ──────────────────────────────────────────────────────
+const WORKER_API_KEY = process.env.WORKER_API_KEY || 'nova-worker-default-key';
+const WORKER_API_PORT = parseInt(process.env.WORKER_API_PORT) || 3005;
+const workerApiClient = axios.create({
+    httpAgent: new http.Agent({ keepAlive: true, keepAliveMsecs: 30000, maxSockets: 10 }),
+    timeout: 15000,
+    headers: { 'X-Worker-Key': WORKER_API_KEY },
+});
 
 // ─── POST /functions ──────────────────────────────────────────────────────────
 /**
@@ -15,6 +26,14 @@ router.post('/functions', (req, res) => {
     if (!name || !image || !region) {
         return res.status(400).json({
             error: 'Missing required fields: name, image, region',
+        });
+    }
+
+    // Validate image name format (prevents shell injection)
+    const IMAGE_REGEX = /^(?:[a-zA-Z0-9._-]+(?::\d+)?\/)?[a-zA-Z0-9._-]+(?::[a-zA-Z0-9._-]+)?$/;
+    if (!IMAGE_REGEX.test(image)) {
+        return res.status(400).json({
+            error: `Invalid image name: "${image}". Allowed format: [registry/]name[:tag]. No shell metacharacters allowed.`,
         });
     }
 
@@ -56,6 +75,94 @@ router.get('/functions/:id', (req, res) => {
     const { invocations } = require('../db/database');
     const invs = invocations.findByFunction(req.params.id);
     return res.json({ function: func, api_keys: keys, invocations: invs });
+});
+
+// ─── GET /functions/:id/stats ────────────────────────────────────────────────
+/**
+ * Get per-container CPU/RAM usage for a function by calling Worker API /container-stats.
+ */
+router.get('/functions/:id/stats', async (req, res) => {
+    const func = functions.findById(req.params.id);
+    if (!func) return res.status(404).json({ error: 'Function not found' });
+
+    // Find all containers for this function
+    const fnContainers = containers.findAll().filter(
+        c => c.function_id === req.params.id && c.status !== 'stopped' && c.status !== 'failed'
+    );
+
+    if (fnContainers.length === 0) {
+        return res.json({
+            function_id: req.params.id,
+            function_name: func.name,
+            containers: [],
+            aggregated: { cpu_percent: 0, memory_used_bytes: 0, memory_limit_bytes: 0 },
+        });
+    }
+
+    // Group by worker to minimize API calls
+    const byWorker = new Map();
+    for (const c of fnContainers) {
+        if (!byWorker.has(c.worker_id)) byWorker.set(c.worker_id, []);
+        byWorker.get(c.worker_id).push(c);
+    }
+
+    // Fetch container stats from each worker
+    const containerStats = [];
+    for (const [workerId, workerContainers] of byWorker) {
+        const worker = workers.findById(workerId);
+        if (!worker) continue;
+
+        try {
+            const { data } = await workerApiClient.get(
+                `http://${worker.ip}:${WORKER_API_PORT}/container-stats`
+            );
+            const statsMap = new Map(
+                (data.containers || []).map(s => [s.name, s])
+            );
+
+            for (const c of workerContainers) {
+                const stats = statsMap.get(c.container_name);
+                containerStats.push({
+                    container_id: c.id,
+                    container_name: c.container_name,
+                    status: c.status,
+                    cpu_percent: stats?.cpu_percent || 0,
+                    memory_used_bytes: stats?.memory_used_bytes || 0,
+                    memory_limit_bytes: stats?.memory_limit_bytes || 0,
+                    memory_percent: stats?.memory_percent || 0,
+                    pids: stats?.pids || 0,
+                });
+            }
+        } catch (_) {
+            // Worker API unavailable — return zeros
+            for (const c of workerContainers) {
+                containerStats.push({
+                    container_id: c.id,
+                    container_name: c.container_name,
+                    status: c.status,
+                    cpu_percent: 0,
+                    memory_used_bytes: 0,
+                    memory_limit_bytes: 0,
+                    memory_percent: 0,
+                    pids: 0,
+                });
+            }
+        }
+    }
+
+    // Aggregate
+    const aggregated = {
+        cpu_percent: containerStats.reduce((sum, c) => sum + c.cpu_percent, 0),
+        memory_used_bytes: containerStats.reduce((sum, c) => sum + c.memory_used_bytes, 0),
+        memory_limit_bytes: containerStats.reduce((sum, c) => sum + c.memory_limit_bytes, 0),
+    };
+
+    return res.json({
+        function_id: req.params.id,
+        function_name: func.name,
+        containers: containerStats,
+        aggregated,
+    });
 });
 
 // ─── DELETE /functions/:id ────────────────────────────────────────────────────
@@ -107,6 +214,41 @@ router.post('/invocations', (req, res) => {
     });
 
     return res.status(201).json({ success: true });
+});
+
+// ─── POST /invocations/batch ──────────────────────────────────────────────────
+/**
+ * Bulk-insert invocations from the gateway's batch buffer.
+ * Uses a SQLite transaction for fast bulk insert (~10-100× faster than individual inserts).
+ */
+router.post('/invocations/batch', (req, res) => {
+    const batch = req.body.invocations;
+    if (!batch || !batch.length) return res.status(400).json({ error: 'empty batch' });
+
+    const { getDb } = require('../db/database');
+    const db = getDb();
+
+    const insert = db.prepare(`
+        INSERT INTO invocations (id, function_id, container_id, status_code, latency_ms, request_method, request_path)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+    `);
+
+    const insertMany = db.transaction((items) => {
+        for (const item of items) {
+            insert.run(
+                uuidv4(),
+                item.function_id,
+                item.container_id || null,
+                item.status_code || 200,
+                item.latency_ms || 0,
+                item.request_method || 'GET',
+                item.request_path || '/'
+            );
+        }
+    });
+
+    insertMany(batch);
+    return res.status(201).json({ success: true, inserted: batch.length });
 });
 
 module.exports = router;

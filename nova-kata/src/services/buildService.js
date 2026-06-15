@@ -1,5 +1,21 @@
 const { createSSHClient } = require('../utils/ssh');
 const logger = require('../utils/logger');
+const axios = require('axios');
+const http = require('http');
+
+// ── Worker API client ──────────────────────────────────────────────────────
+const WORKER_API_KEY = process.env.WORKER_API_KEY || 'nova-worker-default-key';
+const WORKER_API_PORT = parseInt(process.env.WORKER_API_PORT) || 3005;
+const workerApiClient = axios.create({
+    httpAgent: new http.Agent({ keepAlive: true, keepAliveMsecs: 30000, maxSockets: 10 }),
+    timeout: 30000,
+    headers: { 'X-Worker-Key': WORKER_API_KEY },
+});
+
+// ── Shared Registry ────────────────────────────────────────────────────────
+// REGISTRY_HOST points to the shared Docker registry (e.g., '10.128.0.21:5000').
+// Defaults to localhost:5000 for dev/single-worker setups.
+const REGISTRY_HOST = process.env.REGISTRY_HOST || 'localhost:5000';
 
 // ─── Nova Agent — Python ──────────────────────────────────────────────────────
 /**
@@ -15,7 +31,7 @@ const logger = require('../utils/logger');
  */
 const NOVA_AGENT_PY = `
 import importlib.util, json, traceback, os, sys, urllib.parse
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 entry = os.environ.get('NOVA_ENTRY', '/function/handler.py')
 
@@ -92,7 +108,7 @@ class AgentHandler(BaseHTTPRequestHandler):
 if __name__ == '__main__':
     port = int(os.environ.get('NOVA_PORT', 8080))
     print(f'Nova HTTP agent listening on :{port}', flush=True)
-    HTTPServer(('0.0.0.0', port), AgentHandler).serve_forever()
+    ThreadingHTTPServer(('0.0.0.0', port), AgentHandler).serve_forever()
 `;
 
 // ─── Nova Agent — Node.js ─────────────────────────────────────────────────────
@@ -261,12 +277,25 @@ async function buildFunctionImage(worker, opts, onLogArg) {
     const { name, runtime, entryPoint, requirementsFile, files } = opts;
     // onLog can come as 3rd positional arg (how deploy.js calls it) or inside opts
     const onLog = onLogArg || opts.onLog || (() => {});
-    const tag      = `localhost:5000/nova-fn-${name}:latest`;
+    const tag      = `${REGISTRY_HOST}/nova-fn-${name}:latest`;
     const buildDir = `/opt/nova/build/${name}`;
 
     onLog(`🖥️  Using worker ${worker.ip} for build`, 'step');
     onLog(`🔧 Connecting to worker ${worker.ip}...`, 'step');
 
+    // ── Try Worker API for file writes (no SSH) ────────────────────────────
+    let useWorkerApi = false;
+    try {
+        const healthCheck = await workerApiClient.get(`http://${worker.ip}:${WORKER_API_PORT}/health`);
+        if (healthCheck.data && healthCheck.data.containerd_ok) {
+            useWorkerApi = true;
+            onLog('⚡ Using Worker API for file transfers', 'step');
+        }
+    } catch (_) {
+        onLog('🔧 Worker API unavailable — using SSH for all operations', 'step');
+    }
+
+    // SSH connection (needed for streaming build output and as fallback)
     const ssh = await createSSHClient({
         ip:       worker.ip,
         username: worker.username,
@@ -277,7 +306,7 @@ async function buildFunctionImage(worker, opts, onLogArg) {
     try {
         // ── 1. Create clean build directory ───────────────────────────────────
         onLog(`📁 Creating build directory ${buildDir}`, 'step');
-        await sshRun(ssh, `rm -rf ${buildDir} && mkdir -p ${buildDir}`, onLog);
+        await remoteRun(worker, ssh, `rm -rf ${buildDir} && mkdir -p ${buildDir}`, onLog);
 
         // ── 2. Upload user files ───────────────────────────────────────────────
         onLog(`📦 Uploading ${files.length} file(s)...`, 'step');
@@ -285,9 +314,9 @@ async function buildFunctionImage(worker, opts, onLogArg) {
             const relativePath = file.name.replace(/\\/g, '/');
             const remotePath   = `${buildDir}/${relativePath}`;
             const dir          = remotePath.substring(0, remotePath.lastIndexOf('/'));
-            if (dir !== buildDir) await sshRun(ssh, `mkdir -p ${dir}`, onLog);
+            if (dir !== buildDir) await remoteRun(worker, ssh, `mkdir -p ${dir}`, onLog);
             onLog(`  ↳ ${relativePath}`, 'info');
-            await writeRemoteFile(ssh, remotePath, file.content, onLog);
+            await writeRemote(worker, ssh, remotePath, file.content, onLog);
         }
 
         // ── 3. Write nova_agent (HTTP wrapper for all methods) ─────────────────
@@ -295,12 +324,10 @@ async function buildFunctionImage(worker, opts, onLogArg) {
             const agentFile    = runtime === 'nodejs' ? 'nova_agent.js'   : 'nova_agent.py';
             const agentContent = runtime === 'nodejs' ? NOVA_AGENT_JS : NOVA_AGENT_PY;
             onLog(`📝 Writing ${agentFile} (HTTP agent, all methods)`, 'step');
-            await writeRemoteFile(ssh, `${buildDir}/${agentFile}`, agentContent, onLog);
+            await writeRemote(worker, ssh, `${buildDir}/${agentFile}`, agentContent, onLog);
         }
 
         // ── 4. Ensure a requirements/deps file exists ──────────────────────────
-        // If the user didn't include one, write an empty placeholder so the
-        // Dockerfile COPY step never fails.
         const defaultReq = {
             nodejs: 'package.json',
             ruby: 'Gemfile',
@@ -319,24 +346,25 @@ async function buildFunctionImage(worker, opts, onLogArg) {
             else emptyContent = '# no dependencies\n';
 
             onLog(`📝 No ${reqFile} found — writing empty placeholder`, 'step');
-            await writeRemoteFile(ssh, `${buildDir}/${reqFile}`, emptyContent, onLog);
+            await writeRemote(worker, ssh, `${buildDir}/${reqFile}`, emptyContent, onLog);
         }
 
         // ── 5. Write Dockerfile ────────────────────────────────────────────────
         onLog('📝 Writing Dockerfile', 'step');
         const dockerfileGen     = DOCKERFILES[runtime] || DOCKERFILES.python;
         const dockerfileContent = dockerfileGen(reqFile, entryPoint);
-        await writeRemoteFile(ssh, `${buildDir}/Dockerfile`, dockerfileContent, onLog);
+        await writeRemote(worker, ssh, `${buildDir}/Dockerfile`, dockerfileContent, onLog);
 
         // ── 6. Verify build context ────────────────────────────────────────────
         onLog('🔍 Build context:', 'step');
-        await sshRun(ssh, `find ${buildDir} -type f | sed 's|${buildDir}/||'`, onLog);
+        await remoteRun(worker, ssh, `find ${buildDir} -type f | sed 's|${buildDir}/||'`, onLog);
 
         // ── 7. Build OCI image ─────────────────────────────────────────────────
+        // Keep SSH streaming for build output (important for UX)
         onLog(`🐳 Building image ${tag}...`, 'step');
-        await sshRunStream(ssh, `nerdctl build --no-cache --namespace default -t ${tag} ${buildDir} 2>&1`, onLog);
+        await sshRunStream(ssh, `nerdctl build --insecure-registry --no-cache --namespace default -t ${tag} ${buildDir} 2>&1`, onLog);
 
-        // ── 7. Verify image exists ─────────────────────────────────────────────
+        // ── 7b. Verify image exists ────────────────────────────────────────────
         onLog('✅ Verifying image...', 'step');
         const imgCheck = await ssh.exec(`nerdctl images --namespace default | grep nova-fn-${name}`);
         if (imgCheck.code !== 0 || !imgCheck.stdout.includes(`nova-fn-${name}`)) {
@@ -347,7 +375,7 @@ async function buildFunctionImage(worker, opts, onLogArg) {
         // ── 8. Push to local registry so other workers can pull ────────────────
         onLog(`📤 Pushing ${tag} to local registry...`, 'step');
         try {
-            await sshRun(ssh, `nerdctl push ${tag} 2>&1`, onLog);
+            await remoteRun(worker, ssh, `nerdctl push --insecure-registry ${tag} 2>&1`, onLog);
             onLog(`✅ Image pushed to registry`, 'step');
         } catch (pushErr) {
             onLog(`⚠️  Push failed (image only available on this worker): ${pushErr.message}`, 'warn');
@@ -370,8 +398,18 @@ async function buildFunctionImage(worker, opts, onLogArg) {
  * @param {string[]} containerNames - list of container names to stop/remove
  */
 async function deleteFunctionResources(worker, funcName, containerNames = []) {
-    const tag      = `localhost:5000/nova-fn-${funcName}:latest`;
+    const tag      = `${REGISTRY_HOST}/nova-fn-${funcName}:latest`;
     const buildDir = `/opt/nova/build/${funcName}`;
+
+    // ── Try Worker API for stop operations ────────────────────────────────
+    for (const name of containerNames) {
+        logger.info(`[delete:${funcName}] Stopping container ${name}`);
+        try {
+            await workerApiClient.post(`http://${worker.ip}:${WORKER_API_PORT}/stop`, { container_name: name });
+        } catch (_) {
+            // Fall through to SSH below
+        }
+    }
 
     const ssh = await createSSHClient({
         ip:       worker.ip,
@@ -381,9 +419,8 @@ async function deleteFunctionResources(worker, funcName, containerNames = []) {
     });
 
     try {
-        // Stop & remove all known containers
+        // Stop & remove any containers that Worker API didn't handle
         for (const name of containerNames) {
-            logger.info(`[delete:${funcName}] Stopping container ${name}`);
             await ssh.exec(`nerdctl stop ${name} 2>/dev/null || true`);
             await ssh.exec(`nerdctl rm   ${name} 2>/dev/null || true`);
         }
@@ -403,6 +440,43 @@ async function deleteFunctionResources(worker, funcName, containerNames = []) {
     } finally {
         ssh.close();
     }
+}
+
+// ─── Remote execution helpers (Worker API first, SSH fallback) ────────────────
+
+/** Run a command via Worker API or SSH. */
+async function remoteRun(worker, ssh, command, onLog) {
+    // Try Worker API first
+    try {
+        const response = await workerApiClient.post(
+            `http://${worker.ip}:${WORKER_API_PORT}/exec`,
+            { command, timeout: 30000 }
+        );
+        if (response.data && response.data.success) {
+            if (response.data.stdout) onLog(response.data.stdout, 'info');
+            if (response.data.stderr) onLog(response.data.stderr, 'info');
+            return { code: 0, stdout: response.data.stdout, stderr: response.data.stderr };
+        }
+    } catch (_) {}
+
+    // Fallback: SSH
+    return sshRun(ssh, command, onLog);
+}
+
+/** Write a file via Worker API or SSH. */
+async function writeRemote(worker, ssh, remotePath, content, onLog) {
+    // Try Worker API first
+    try {
+        const content_base64 = Buffer.from(content).toString('base64');
+        const response = await workerApiClient.post(
+            `http://${worker.ip}:${WORKER_API_PORT}/write-file`,
+            { path: remotePath, content_base64 }
+        );
+        if (response.data && response.data.success) return;
+    } catch (_) {}
+
+    // Fallback: SSH
+    return writeRemoteFile(ssh, remotePath, content, onLog);
 }
 
 // ─── SSH helpers ──────────────────────────────────────────────────────────────

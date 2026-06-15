@@ -3,6 +3,7 @@ import { Inter } from "next/font/google";
 import "./globals.css";
 import Link from "next/link";
 import { LayoutDashboard, Rocket, Server, Activity } from "lucide-react";
+import ThemeToggle from "../components/ThemeToggle";
 
 const inter = Inter({ subsets: ["latin"] });
 
@@ -11,13 +12,15 @@ export const metadata: Metadata = {
   description: "Next-gen container management",
 };
 
+const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:3002";
+
 export default function RootLayout({
   children,
 }: Readonly<{
   children: React.ReactNode;
 }>) {
   return (
-    <html lang="en" className="dark">
+    <html lang="en" className="dark" suppressHydrationWarning>
       <body className={`${inter.className} min-h-screen flex bg-background`} suppressHydrationWarning>
         {/* Sidebar */}
         <aside className="w-64 border-r border-border bg-background flex flex-col">
@@ -40,7 +43,7 @@ export default function RootLayout({
               <Server size={18} />
               Worker Pool
             </Link>
-            <Link href="/metrics" className="flex items-center gap-3 px-3 py-2 rounded-md hover:bg-accent text-sm font-medium transition-colors text-muted-foreground opacity-50 cursor-not-allowed pointer-events-none">
+            <Link href="/metrics" className="flex items-center gap-3 px-3 py-2 rounded-md hover:bg-accent text-sm font-medium transition-colors">
               <Activity size={18} />
               Metrics
             </Link>
@@ -53,8 +56,11 @@ export default function RootLayout({
         {/* Main Content */}
         <main className="flex-1 flex flex-col h-screen overflow-hidden">
           <header className="h-16 flex items-center px-8 border-b border-border justify-between bg-background/50 backdrop-blur-md sticky top-0 z-10">
-            <div className="text-sm text-muted-foreground">Placement Service API: <span className="text-primary font-mono ml-1">localhost:3002</span></div>
-            <div className="h-8 w-8 rounded-full bg-accent border border-border flex items-center justify-center text-xs">US</div>
+            <div className="text-sm text-muted-foreground">Placement Service API: <span className="text-primary font-mono ml-1">{API_URL.replace(/^https?:\/\//, '')}</span></div>
+            <div className="flex items-center gap-3">
+              <ThemeToggle />
+              <div className="h-8 w-8 rounded-full bg-accent border border-border flex items-center justify-center text-xs">US</div>
+            </div>
           </header>
           <div className="flex-1 overflow-auto p-8">
             <div className="max-w-6xl mx-auto">
@@ -66,3 +72,4 @@ export default function RootLayout({
     </html>
   );
 }
+

@@ -2,21 +2,34 @@
 
 import { useEffect, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
-import { ArrowLeft, RefreshCw, Terminal, Activity, Layers, Database, Cpu, Copy, Clock, CheckCircle2, AlertCircle } from "lucide-react";
+import { ArrowLeft, RefreshCw, Terminal, Activity, Layers, Database, Cpu, Copy, Clock, CheckCircle2, AlertCircle, MemoryStick } from "lucide-react";
 import Link from "next/link";
+
+const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:3002";
+
+function formatBytes(bytes: number): string {
+  if (bytes === 0) return "0 B";
+  const units = ["B", "KB", "MB", "GB", "TB"];
+  const i = Math.floor(Math.log(bytes) / Math.log(1024));
+  return `${(bytes / Math.pow(1024, i)).toFixed(1)} ${units[i]}`;
+}
 
 export default function FunctionDetailsPage() {
   const { id } = useParams();
   const router = useRouter();
   const [func, setFunc] = useState<any>(null);
+  const [liveStats, setLiveStats] = useState<any>(null);
   const [loading, setLoading] = useState(true);
 
   const fetchDetails = async () => {
     try {
-      const res = await fetch(`http://localhost:3002/functions/${id}`);
-      if (!res.ok) throw new Error("Failed to fetch");
-      const data = await res.json();
-      setFunc(data);
+      const [funcRes, statsRes] = await Promise.allSettled([
+        fetch(`${API_URL}/functions/${id}`).then((r) => r.json()),
+        fetch(`${API_URL}/functions/${id}/stats`).then((r) => r.json()),
+      ]);
+
+      if (funcRes.status === "fulfilled") setFunc(funcRes.value);
+      if (statsRes.status === "fulfilled") setLiveStats(statsRes.value);
     } catch (e) {
       console.error(e);
     } finally {
@@ -136,16 +149,26 @@ export default function FunctionDetailsPage() {
       <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
         <div className="bg-card border border-border p-4 rounded-xl shadow-sm flex items-center gap-3">
           <Layers size={16} className="text-purple-500" />
-          <div>
+          <div className="flex-1">
             <div className="text-xs text-muted-foreground">Memory Limit</div>
             <div className="font-semibold">{mem >= 1024 ? `${mem/1024} GB` : `${mem} MB`}</div>
+            {liveStats?.aggregated?.memory_used_bytes > 0 && (
+              <div className="text-xs text-green-500 mt-1">
+                Using {formatBytes(liveStats.aggregated.memory_used_bytes)} live
+              </div>
+            )}
           </div>
         </div>
         <div className="bg-card border border-border p-4 rounded-xl shadow-sm flex items-center gap-3">
           <Cpu size={16} className="text-orange-500" />
-          <div>
+          <div className="flex-1">
             <div className="text-xs text-muted-foreground">vCPU Limit</div>
             <div className="font-semibold">{cpu} vCPU</div>
+            {liveStats?.aggregated?.cpu_percent > 0 && (
+              <div className="text-xs text-blue-500 mt-1">
+                {liveStats.aggregated.cpu_percent.toFixed(1)}% used live
+              </div>
+            )}
           </div>
         </div>
         <div className="bg-card border border-border p-4 rounded-xl shadow-sm flex items-center gap-3">
@@ -156,6 +179,52 @@ export default function FunctionDetailsPage() {
           </div>
         </div>
       </div>
+
+      {/* Live Container Stats */}
+      {liveStats?.containers?.length > 0 && (
+        <div className="bg-card border border-border rounded-xl shadow-sm overflow-hidden">
+          <div className="p-4 border-b border-border bg-accent/30 flex items-center gap-2">
+            <MemoryStick size={16} className="text-muted-foreground" />
+            <h3 className="font-semibold text-sm">Live Container Stats</h3>
+          </div>
+          <div className="overflow-x-auto">
+            <table className="w-full text-sm text-left">
+              <thead className="bg-accent/20 text-muted-foreground text-xs uppercase border-b border-border">
+                <tr>
+                  <th className="px-6 py-3 font-medium">Container</th>
+                  <th className="px-6 py-3 font-medium">Status</th>
+                  <th className="px-6 py-3 font-medium">CPU %</th>
+                  <th className="px-6 py-3 font-medium">RAM Used</th>
+                  <th className="px-6 py-3 font-medium">RAM Limit</th>
+                  <th className="px-6 py-3 font-medium">PIDs</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-border">
+                {liveStats.containers.map((c: any) => (
+                  <tr key={c.container_id} className="hover:bg-accent/10 transition-colors">
+                    <td className="px-6 py-3 font-mono text-xs">{c.container_name}</td>
+                    <td className="px-6 py-3">
+                      <span className={`px-2 py-0.5 rounded text-xs font-medium ${
+                        c.status === 'running' ? 'bg-green-500/10 text-green-500' :
+                        c.status === 'paused' ? 'bg-yellow-500/10 text-yellow-500' :
+                        'bg-gray-500/10 text-gray-500'
+                      }`}>{c.status}</span>
+                    </td>
+                    <td className="px-6 py-3 font-mono text-xs text-blue-500">{c.cpu_percent.toFixed(1)}%</td>
+                    <td className="px-6 py-3 font-mono text-xs text-green-500">
+                      {c.memory_used_bytes ? formatBytes(c.memory_used_bytes) : "—"}
+                    </td>
+                    <td className="px-6 py-3 font-mono text-xs">
+                      {c.memory_limit_bytes ? formatBytes(c.memory_limit_bytes) : "—"}
+                    </td>
+                    <td className="px-6 py-3 font-mono text-xs">{c.pids || "—"}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
 
       <div className="bg-card border border-border rounded-xl shadow-sm overflow-hidden">
         <div className="p-4 border-b border-border bg-accent/30 flex items-center gap-2">

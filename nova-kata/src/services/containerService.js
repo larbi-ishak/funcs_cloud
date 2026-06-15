@@ -3,9 +3,42 @@ const { createSSHClient } = require('../utils/ssh');
 const { workers, containers, warmPool } = require('../db/database');
 const logger = require('../utils/logger');
 const { logTiming } = require('../utils/timingLogger');
+const axios = require('axios');
+const http = require('http');
 
-const DEFAULT_IMAGE = process.env.DEFAULT_IMAGE || 'localhost:5000/nova-fn-hello:latest';
+const REGISTRY_HOST = process.env.REGISTRY_HOST || 'localhost:5000';
+const WORKER_API_KEY = process.env.WORKER_API_KEY || 'nova-worker-default-key';
+const WORKER_API_PORT = parseInt(process.env.WORKER_API_PORT) || 3005;
+
+// ── Persistent HTTP client for Worker API (keep-alive, no handshake per request) ──
+const workerApiClient = axios.create({
+    httpAgent: new http.Agent({
+        keepAlive: true,
+        keepAliveMsecs: 30000,
+        maxSockets: 50,
+    }),
+    timeout: 30000,
+    headers: { 'X-Worker-Key': WORKER_API_KEY },
+});
+const DEFAULT_IMAGE = process.env.DEFAULT_IMAGE || `${REGISTRY_HOST}/nova-fn-hello:latest`;
 const DEFAULT_RUNTIME = process.env.DEFAULT_RUNTIME || 'io.containerd.kata.v2';
+
+// ── Image name validation (prevents shell injection) ──────────────────────────
+// Allowed format: [registry/]name[:tag] — rejects shell metacharacters
+const IMAGE_REGEX = /^(?:[a-zA-Z0-9._-]+(?::\d+)?\/)?[a-zA-Z0-9._-]+(?::[a-zA-Z0-9._-]+)?$/;
+
+function validateImageName(image) {
+    if (!image || typeof image !== 'string') {
+        throw new Error('Image name is required and must be a string');
+    }
+    if (!IMAGE_REGEX.test(image)) {
+        throw new Error(
+            `Invalid image name: "${image}". ` +
+            `Allowed format: [registry/]name[:tag]. ` +
+            `No shell metacharacters allowed.`
+        );
+    }
+}
 const DEFAULT_SNAPSHOTTER = process.env.DEFAULT_SNAPSHOTTER || 'overlayfs';
 const DEFAULT_AGENT_CMD = process.env.DEFAULT_AGENT_CMD || 'python3 /nova_agent.py';
 const DEFAULT_AGENT_PORT = parseInt(process.env.DEFAULT_AGENT_PORT) || 8080;
@@ -13,9 +46,9 @@ const DEFAULT_AGENT_PORT = parseInt(process.env.DEFAULT_AGENT_PORT) || 8080;
 /**
  * Launch a new container via nerdctl on a worker.
  *
- * Uses the Kata QEMU runtime. Each container gets its own IP via CNI
- * networking (nerdctl handles this automatically). We discover the IP
- * with `nerdctl inspect` and configure nginx to proxy to it.
+ * Uses the Kata QEMU runtime with -p port mapping (nerdctl handles
+ * iptables/NAT). No nginx required — the gateway routes directly to
+ * worker_ip:hostPort, which nerdctl maps to the container's agent port.
  *
  * @param {string} workerId
  * @param {object} options - image, env_vars, function_id, agent_cmd, agent_port, pause_after
@@ -35,6 +68,7 @@ async function launchContainer(workerId, options = {}) {
     const logPrefix = `Container[${rid}] on worker ${worker.ip}`;
 
     const image = resolveImageTag(options.image || DEFAULT_IMAGE);
+    validateImageName(image);
     const runtime = options.runtime || DEFAULT_RUNTIME;
     const agentCmd = options.agent_cmd || DEFAULT_AGENT_CMD;
     const agentPort = options.agent_port || DEFAULT_AGENT_PORT;
@@ -67,6 +101,7 @@ async function launchContainer(workerId, options = {}) {
         status: 'creating',
         function_id: functionId,
         metadata: JSON.stringify(metadata),
+        started_at: new Date().toISOString(),
     });
 
     const envFlags = [`--env NOVA_PORT=${agentPort}`];
@@ -82,14 +117,16 @@ async function launchContainer(workerId, options = {}) {
     const launchScript = `#!/usr/bin/env bash
 set -euo pipefail
 
-# ── 1. Run container with Kata QEMU runtime ──────────────────────────────────
-# Note: no command is passed — the image's CMD is used directly.
-# This avoids the ENTRYPOINT+args confusion when cached images have stale entrypoints.
-# --pull missing: use local cache if available, otherwise pull from registry (localhost:5000)
+# ── 1. Run container with Kata QEMU runtime + port mapping ────────────────────
+# -p ${hostPort}:${agentPort} maps worker host port → container agent port
+# No nginx needed — nerdctl handles iptables/NAT forwarding directly.
+# --pull missing: use local cache if available, otherwise pull from registry
 nerdctl run \\
   --pull missing \\
+  --insecure-registry \\
   --runtime ${runtime} \\
   --snapshotter ${DEFAULT_SNAPSHOTTER} \\
+  -p ${hostPort}:${agentPort} \\
   ${memoryLimit} \\
   ${cpuLimit} \\
   ${envFlags.join(' \\\n  ')} \\
@@ -97,10 +134,13 @@ nerdctl run \\
   --name ${containerName} \\
   ${image}
 
-# ── 2. Get container IP (retry loop — Kata VMs need time to boot) ────────────
+# ── 2. Wait for container to be ready (Kata VMs need time to boot) ───────────
+# Poll every 0.2s instead of 1s — reduces IP detection from ~3s to ~0.6s
 CONTAINER_IP=""
-for i in $(seq 1 15); do
-    sleep 1
+ELAPSED=0
+while [ $ELAPSED -lt 15000 ]; do
+    sleep 0.2
+    ELAPSED=$((ELAPSED + 200))
     # Try primary format first
     CONTAINER_IP=$(nerdctl inspect ${containerName} --format '{{.NetworkSettings.IPAddress}}' 2>/dev/null || echo "")
     # Fallback: grep raw JSON
@@ -124,30 +164,62 @@ if [ -z "$CONTAINER_IP" ]; then
     exit 1
 fi
 
-# ── 3. Add nginx reverse proxy config ────────────────────────────────────────
-cat > /etc/nginx/conf.d/nova-${containerName}.conf <<NGINXEOF
-server {
-    listen ${hostPort};
-    location / {
-        proxy_pass http://$CONTAINER_IP:${agentPort};
-        proxy_set_header Host \\$host;
-        proxy_set_header X-Real-IP \\$remote_addr;
-        proxy_set_header X-Forwarded-For \\$proxy_add_x_forwarded_for;
-    }
-}
-NGINXEOF
-nginx -s reload 2>/dev/null || true
-
-# ── 4. Optionally pause for warm pool ────────────────────────────────────────
+# ── 3. Optionally pause for warm pool ────────────────────────────────────────
 ${pauseAfter ? `sleep 2\nnerdctl pause ${containerName}` : '# not pausing'}
 
 printf '{"container_ip":"%s","host_port":${hostPort},"status":"ok"}\\n' "$CONTAINER_IP"
 `;
 
-    let ssh;
+    const encoded = Buffer.from(launchScript).toString('base64');
+    let launchVia = 'unknown';
+
     try {
+        // ── Try Worker API first (no SSH handshake, saves ~1s) ────────────────
+        const t_api = performance.now();
+        try {
+            const response = await workerApiClient.post(
+                `http://${worker.ip}:${WORKER_API_PORT}/launch`,
+                { script_base64: encoded },
+                { timeout: 90000 }
+            );
+
+            if (response.data && response.data.success) {
+                launchVia = 'worker_api';
+                logTiming(rid, 'worker_api_launch', performance.now() - t_launch, {
+                    worker_ip: worker.ip, step_ms: +(performance.now() - t_api).toFixed(2),
+                });
+
+                // Parse output for container IP
+                let containerIp = null;
+                try {
+                    const lastLine = response.data.stdout.trim().split('\n').pop();
+                    const parsed = JSON.parse(lastLine);
+                    containerIp = parsed.container_ip || null;
+                } catch (_) {
+                    logger.warn(`${logPrefix}: Could not parse Worker API output: ${response.data.stdout}`);
+                }
+
+                const status = pauseAfter ? 'paused' : 'running';
+                containers.updateStatus(containerId, status, {
+                    container_ip: containerIp,
+                    host_port: hostPort,
+                });
+
+                const totalMs = +(performance.now() - t_launch).toFixed(2);
+                logTiming(rid, 'launch_complete', totalMs, { containerId, containerIp, total_ms: totalMs, via: 'worker_api' });
+                logger.info(`${logPrefix}: Container started via Worker API (IP ${containerIp}) — ${totalMs}ms`);
+
+                return containers.findById(containerId);
+            }
+            throw new Error('Worker API launch returned non-success');
+        } catch (apiErr) {
+            logger.warn(`${logPrefix}: Worker API launch failed (${apiErr.message}), falling back to SSH`);
+        }
+
+        // ── Fallback: SSH ────────────────────────────────────────────────────
+        launchVia = 'ssh';
         const t_ssh = performance.now();
-        ssh = await createSSHClient({
+        const ssh = await createSSHClient({
             ip: worker.ip, username: worker.username,
             password: worker.password, port: worker.ssh_port,
         });
@@ -155,49 +227,49 @@ printf '{"container_ip":"%s","host_port":${hostPort},"status":"ok"}\\n' "$CONTAI
             worker_ip: worker.ip, step_ms: +(performance.now() - t_ssh).toFixed(2),
         });
 
-        const t_script = performance.now();
-        const encoded = Buffer.from(launchScript).toString('base64');
-        // 90s timeout: Kata VM boot can take 5-15s, and nerdctl pause can hang if daemon is busy
-        const result = await ssh.exec(`echo '${encoded}' | base64 -d | bash`, 90000);
-
-        if (result.code !== 0) {
-            throw new Error(`Launch script failed (exit ${result.code}): ${result.stderr || result.stdout || '(no output)'}`);
-        }
-
-        logTiming(rid, 'container_started', performance.now() - t_launch, {
-            step_ms: +(performance.now() - t_script).toFixed(2),
-        });
-
-        // Parse output for container IP
-        let containerIp = null;
         try {
-            const lastLine = result.stdout.trim().split('\n').pop();
-            const parsed = JSON.parse(lastLine);
-            containerIp = parsed.container_ip || null;
-        } catch (_) {
-            logger.warn(`${logPrefix}: Could not parse script output: ${result.stdout}`);
+            const t_script = performance.now();
+            // 90s timeout: Kata VM boot can take 5-15s, and nerdctl pause can hang if daemon is busy
+            const result = await ssh.exec(`echo '${encoded}' | base64 -d | bash`, 90000);
+
+            if (result.code !== 0) {
+                throw new Error(`Launch script failed (exit ${result.code}): ${result.stderr || result.stdout || '(no output)'}`);
+            }
+
+            logTiming(rid, 'container_started', performance.now() - t_launch, {
+                step_ms: +(performance.now() - t_script).toFixed(2),
+            });
+
+            // Parse output for container IP
+            let containerIp = null;
+            try {
+                const lastLine = result.stdout.trim().split('\n').pop();
+                const parsed = JSON.parse(lastLine);
+                containerIp = parsed.container_ip || null;
+            } catch (_) {
+                logger.warn(`${logPrefix}: Could not parse script output: ${result.stdout}`);
+            }
+
+            const status = pauseAfter ? 'paused' : 'running';
+            containers.updateStatus(containerId, status, {
+                container_ip: containerIp,
+                host_port: hostPort,
+            });
+
+            const totalMs = +(performance.now() - t_launch).toFixed(2);
+            logTiming(rid, 'launch_complete', totalMs, { containerId, containerIp, total_ms: totalMs, via: 'ssh' });
+            logger.info(`${logPrefix}: Container started via SSH (IP ${containerIp}) — ${totalMs}ms`);
+
+            return containers.findById(containerId);
+        } finally {
+            ssh.close();
         }
-
-        const status = pauseAfter ? 'paused' : 'running';
-        containers.updateStatus(containerId, status, {
-            container_ip: containerIp,
-            host_port: hostPort,
-        });
-
-        const totalMs = +(performance.now() - t_launch).toFixed(2);
-        logTiming(rid, 'launch_complete', totalMs, { containerId, containerIp, total_ms: totalMs });
-        logger.info(`${logPrefix}: Container started (IP ${containerIp}) — ${totalMs}ms`);
-
-        return containers.findById(containerId);
-
     } catch (err) {
         const totalMs = +(performance.now() - t_launch).toFixed(2);
-        logTiming(rid, 'launch_failed', totalMs, { error: err.message, total_ms: totalMs });
+        logTiming(rid, 'launch_failed', totalMs, { error: err.message, total_ms: totalMs, via: launchVia });
         containers.updateStatus(containerId, 'failed');
         logger.error(`${logPrefix}: Launch failed — ${err.message}`);
         throw err;
-    } finally {
-        if (ssh) ssh.close();
     }
 }
 
@@ -222,6 +294,26 @@ async function unpauseContainer(containerId) {
     logger.info(`${logPrefix}: Unpausing...`);
     logTiming(rid, 'unpause_start', 0, { containerId, containerName: container.container_name });
 
+    // ── Try Worker API first (fast, no SSH) ─────────────────────────────────
+    try {
+        const response = await workerApiClient.post(
+            `http://${worker.ip}:${WORKER_API_PORT}/unpause`,
+            { container_name: container.container_name }
+        );
+
+        if (response.data && response.data.success) {
+            containers.updateStatus(containerId, 'running');
+            const totalMs = +(performance.now() - t0).toFixed(2);
+            logTiming(rid, 'unpause_complete', totalMs, { total_ms: totalMs, via: 'worker_api' });
+            logger.info(`${logPrefix}: Unpaused via Worker API — ${totalMs}ms`);
+            return containers.findById(containerId);
+        }
+        throw new Error('Worker API returned non-success');
+    } catch (apiErr) {
+        logger.warn(`${logPrefix}: Worker API unpause failed (${apiErr.message}), falling back to SSH`);
+    }
+
+    // ── Fallback: SSH ───────────────────────────────────────────────────────
     let ssh;
     try {
         ssh = await createSSHClient({
@@ -237,8 +329,8 @@ async function unpauseContainer(containerId) {
         containers.updateStatus(containerId, 'running');
 
         const totalMs = +(performance.now() - t0).toFixed(2);
-        logTiming(rid, 'unpause_complete', totalMs, { total_ms: totalMs });
-        logger.info(`${logPrefix}: Unpaused — ${totalMs}ms`);
+        logTiming(rid, 'unpause_complete', totalMs, { total_ms: totalMs, via: 'ssh' });
+        logger.info(`${logPrefix}: Unpaused via SSH — ${totalMs}ms`);
 
         return containers.findById(containerId);
 
@@ -266,6 +358,24 @@ async function pauseContainer(containerId) {
     const logPrefix = `Container[${containerId.slice(0, 8)}]`;
     logger.info(`${logPrefix}: Pausing...`);
 
+    // ── Try Worker API first (fast, no SSH) ─────────────────────────────────
+    try {
+        const response = await workerApiClient.post(
+            `http://${worker.ip}:${WORKER_API_PORT}/pause`,
+            { container_name: container.container_name }
+        );
+
+        if (response.data && response.data.success) {
+            containers.updateStatus(containerId, 'paused');
+            logger.info(`${logPrefix}: Paused via Worker API`);
+            return;
+        }
+        throw new Error('Worker API returned non-success');
+    } catch (apiErr) {
+        logger.warn(`${logPrefix}: Worker API pause failed (${apiErr.message}), falling back to SSH`);
+    }
+
+    // ── Fallback: SSH ───────────────────────────────────────────────────────
     let ssh;
     try {
         ssh = await createSSHClient({
@@ -279,7 +389,7 @@ async function pauseContainer(containerId) {
         }
 
         containers.updateStatus(containerId, 'paused');
-        logger.info(`${logPrefix}: Paused`);
+        logger.info(`${logPrefix}: Paused via SSH`);
 
     } finally {
         if (ssh) ssh.close();
@@ -308,17 +418,32 @@ set -uo pipefail
 # ── 1. Unpause if paused (nerdctl rm requires running or stopped) ─────────────
 nerdctl unpause ${container.container_name} 2>/dev/null || true
 
-# ── 2. Stop and remove container ──────────────────────────────────────────────
+# ── 2. Stop and remove container (port mapping is auto-cleaned by nerdctl) ────
 nerdctl stop ${container.container_name} 2>/dev/null || true
 nerdctl rm -f ${container.container_name} 2>/dev/null || true
-
-# ── 3. Remove nginx config and reload ─────────────────────────────────────────
-rm -f /etc/nginx/conf.d/nova-${container.container_name}.conf
-nginx -s reload 2>/dev/null || true
 
 echo '{"status":"stopped"}'
 `;
 
+    // ── Try Worker API first (no SSH handshake) ─────────────────────────────
+    try {
+        const response = await workerApiClient.post(
+            `http://${worker.ip}:${WORKER_API_PORT}/stop`,
+            { container_name: container.container_name }
+        );
+
+        if (response.data && response.data.success) {
+            warmPool.deleteByContainer(containerId);
+            containers.updateStatus(containerId, 'stopped');
+            logger.info(`${logPrefix}: Stopped and removed via Worker API`);
+            return;
+        }
+        throw new Error('Worker API stop returned non-success');
+    } catch (apiErr) {
+        logger.warn(`${logPrefix}: Worker API stop failed (${apiErr.message}), falling back to SSH`);
+    }
+
+    // ── Fallback: SSH ───────────────────────────────────────────────────────
     let ssh;
     try {
         ssh = await createSSHClient({
@@ -337,7 +462,7 @@ echo '{"status":"stopped"}'
         warmPool.deleteByContainer(containerId);
 
         containers.updateStatus(containerId, 'stopped');
-        logger.info(`${logPrefix}: Stopped and removed`);
+        logger.info(`${logPrefix}: Stopped and removed via SSH`);
     } finally {
         if (ssh) ssh.close();
     }
@@ -354,7 +479,7 @@ echo '{"status":"stopped"}'
 function resolveImageTag(image) {
     if (!image) return DEFAULT_IMAGE;
     if (image.includes('/')) return image;  // already has registry prefix
-    const resolved = `localhost:5000/${image}`;
+    const resolved = `${REGISTRY_HOST}/${image}`;
     logger.debug(`Image tag resolved: ${image} → ${resolved}`);
     return resolved;
 }

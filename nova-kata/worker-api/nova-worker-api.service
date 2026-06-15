@@ -1,0 +1,15 @@
+[Unit]
+Description=Nova Worker API — HTTP agent for container operations
+After=network.target containerd.service
+Requires=containerd.service
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/nova/worker-api
+ExecStart=/usr/local/bin/node /opt/nova/worker-api/index.js
+Restart=always
+RestartSec=5
+EnvironmentFile=/opt/nova/worker-api/.env
+
+[Install]
+WantedBy=multi-user.target

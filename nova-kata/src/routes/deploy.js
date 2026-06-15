@@ -91,7 +91,7 @@ router.post('/functions/deploy', upload.array('files'), async (req, res) => {
         log(`🖥️  Using worker ${worker.ip} for build`, 'step');
 
         // ── 2. Build the image ────────────────────────────────────────────────
-        const image = `localhost:5000/nova-fn-${functionName}:latest`;
+        // Image tag is set by buildFunctionImage using REGISTRY_HOST
         let buildResult;
         try {
             // multer may strip directory from originalname (security feature).
@@ -160,8 +160,36 @@ router.post('/functions/deploy', upload.array('files'), async (req, res) => {
             func = functions.findById(funcId);
             log(`📦 Function '${functionName}' registered (id: ${func.id})`, 'step');
         } else {
-            // Update image tag
+            // Update function record with new image and settings
             log(`📦 Function '${functionName}' already exists — updating image`, 'step');
+            functions.update(func.id, {
+                image: buildResult.image,
+                agent_cmd: agentCmd,
+                agent_port: agentPort,
+                env_vars: env_vars || null,
+                memory_limit: memory_limit ? parseInt(memory_limit) : null,
+                cpu_limit: cpu_limit ? parseFloat(cpu_limit) : null,
+                warm_count: targetWarm,
+            });
+            func = functions.findById(func.id); // Refresh from DB
+
+            // Stop old containers running the previous image
+            const oldContainers = containers.findAll().filter(
+                c => c.function_id === func.id && c.status !== 'stopped' && c.status !== 'failed'
+            );
+            if (oldContainers.length > 0) {
+                log(`🧹 Stopping ${oldContainers.length} old container(s) with previous image...`, 'step');
+                for (const c of oldContainers) {
+                    try { await stopContainer(c.id); } catch (_) { /* best effort */ }
+                }
+                warmPool.removeByFunctionId(func.id);
+            }
+
+            // Invalidate gateway cache so it picks up the new image
+            try {
+                const { invalidateGatewayCache } = require('../services/monitoringService');
+                invalidateGatewayCache();
+            } catch (_) {}
         }
 
         // ── 4. Pre-warm containers ────────────────────────────────────────────

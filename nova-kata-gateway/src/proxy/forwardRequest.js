@@ -1,6 +1,41 @@
 import { createProxyMiddleware } from 'http-proxy-middleware';
 import logger from '../utils/logger.js';
 import axios from 'axios';
+import http from 'http';
+import { requestDuration } from '../utils/metrics.js';
+
+const PLACEMENT_URL = process.env.PLACEMENT_SERVICE_URL || 'http://localhost:3002';
+const PROXY_TIMEOUT_MS = parseInt(process.env.PROXY_TIMEOUT_MS) || 30000;
+
+// Reuse TCP connections to containers (keep-alive) instead of opening a new
+// socket per request. Saves ~1-5ms TCP handshake per proxied request and
+// prevents ephemeral port exhaustion under high load.
+const proxyAgent = new http.Agent({
+    keepAlive: true,
+    keepAliveMsecs: 30000,
+    maxSockets: 100,
+});
+
+// ── Batch invocation logging ──────────────────────────────────────────────
+// Instead of POSTing to the placement service for every single request,
+// buffer invocations in memory and flush as a batch every 1 second.
+// Reduces placement service load by 100-1000× under high traffic.
+const invocationBuffer = [];
+const MAX_BUFFER_SIZE = 10000;
+
+function flushInvocationBuffer() {
+    if (invocationBuffer.length === 0) return;
+    const batch = [...invocationBuffer];
+    invocationBuffer.length = 0;
+    axios.post(`${PLACEMENT_URL}/invocations/batch`, { invocations: batch })
+        .catch(err => logger.error({ err }, 'Failed to log invocation batch'));
+}
+
+setInterval(flushInvocationBuffer, 1000).unref();
+
+// Flush remaining invocations on shutdown
+process.on('SIGTERM', flushInvocationBuffer);
+process.on('SIGINT', flushInvocationBuffer);
 
 const proxyMiddleware = createProxyMiddleware({
     router: (req) => {
@@ -9,6 +44,9 @@ const proxyMiddleware = createProxyMiddleware({
     target: "http://localhost",
     changeOrigin: false,
     ws: true,
+    agent: proxyAgent,
+    proxyTimeout: PROXY_TIMEOUT_MS,
+    timeout: PROXY_TIMEOUT_MS + 5000,
     on: {
         proxyReq: (proxyReq, req, res) => {
             if (req.requestId) {
@@ -28,17 +66,21 @@ const proxyMiddleware = createProxyMiddleware({
                 vmTarget: req.vmTarget,
                 statusCode: proxyRes.statusCode,
             }, 'proxy_response_received');
-            // Log invocation asynchronously
+            // Record Prometheus metric
+            const fnName = (req.functionData && req.functionData.name) || 'unknown';
+            requestDuration.labels(fnName, String(proxyRes.statusCode), req.method).observe(elapsed / 1000);
+            // Buffer invocation for batch logging (flushed every 1s)
             if (req.functionData && req.containerId) {
-                const PLACEMENT_URL = process.env.PLACEMENT_SERVICE_URL || 'http://localhost:3002';
-                axios.post(`${PLACEMENT_URL}/invocations`, {
-                    function_id: req.functionData.id,
-                    container_id: req.containerId,
-                    status_code: proxyRes.statusCode,
-                    latency_ms: Math.round(elapsed),
-                    request_method: req.method,
-                    request_path: req.url
-                }).catch(err => logger.error({ err }, 'Failed to log invocation'));
+                if (invocationBuffer.length < MAX_BUFFER_SIZE) {
+                    invocationBuffer.push({
+                        function_id: req.functionData.id,
+                        container_id: req.containerId,
+                        status_code: proxyRes.statusCode,
+                        latency_ms: Math.round(elapsed),
+                        request_method: req.method,
+                        request_path: req.url
+                    });
+                }
             }
         },
         error: (err, req, res) => {

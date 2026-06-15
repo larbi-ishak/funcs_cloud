@@ -1,5 +1,6 @@
 const { Client } = require('ssh2');
 const logger = require('./logger');
+const { decrypt } = require('./crypto');
 
 const DEFAULT_TIMEOUT = parseInt(process.env.SSH_CONNECT_TIMEOUT) || 10000;
 const DEFAULT_EXEC_TIMEOUT = parseInt(process.env.SSH_EXEC_TIMEOUT) || 30000;
@@ -12,6 +13,10 @@ const DEFAULT_EXEC_TIMEOUT = parseInt(process.env.SSH_EXEC_TIMEOUT) || 30000;
  * disable the SSH "password" method but allow keyboard-interactive).
  */
 function createSSHClient({ ip, username, password, port = 22 }) {
+    // Decrypt password if it's encrypted (AES-256-GCM).
+    // Legacy plaintext passwords are returned as-is by decrypt().
+    const actualPassword = decrypt(password);
+
     return new Promise((resolve, reject) => {
         const conn = new Client();
         const timer = setTimeout(() => {
@@ -65,14 +70,14 @@ function createSSHClient({ ip, username, password, port = 22 }) {
         });
 
         conn.on('keyboard-interactive', (name, instructions, instructionsLang, prompts, finish) => {
-            finish([password]);
+            finish([actualPassword]);
         });
 
         conn.connect({
             host: ip,
             port,
             username,
-            password,
+            password: actualPassword,
             tryKeyboard: true,
             readyTimeout: DEFAULT_TIMEOUT,
             authHandler: ['password', 'keyboard-interactive', 'publickey'],

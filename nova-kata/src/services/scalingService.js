@@ -122,7 +122,7 @@ async function scaleOut({ region, onLine } = {}) {
         await waitForSsh({ ip, username: 'root', password: rootPassword, port: sshPort, log });
         log('SSH is ready.');
 
-        // ── Phase 3: Run provisioning (containerd, Kata, nerdctl, nginx…) ────
+        // ── Phase 3: Run provisioning (containerd, Kata, nerdctl, Worker API) ──
         log('Starting worker provisioning...');
         await provisionWorker({
             ip,

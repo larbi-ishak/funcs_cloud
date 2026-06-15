@@ -4,17 +4,26 @@ import { useEffect, useState } from "react";
 import Link from "next/link";
 import { Copy, Terminal, Trash2, Zap, RefreshCw, Layers } from "lucide-react";
 
+const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:3002";
+const GATEWAY_URL = process.env.NEXT_PUBLIC_GATEWAY_URL || "http://localhost:8081";
+
+// Image name validation regex (matches backend)
+const IMAGE_REGEX = /^(?:[a-zA-Z0-9._-]+(?::\d+)?\/)?[a-zA-Z0-9._-]+(?::[a-zA-Z0-9._-]+)?$/;
+
 export default function Dashboard() {
   const [functions, setFunctions] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
 
   const fetchFunctions = async () => {
     try {
-      const res = await fetch("http://localhost:3002/functions");
+      const res = await fetch(`${API_URL}/functions`);
       if (!res.ok) throw new Error("Failed to fetch");
       const data = await res.json();
       setFunctions(data.functions);
-    } catch (e) {
+      setError(null);
+    } catch (e: any) {
+      setError(e.message);
       console.error(e);
     } finally {
       setLoading(false);
@@ -28,9 +37,9 @@ export default function Dashboard() {
   }, []);
 
   const deleteFunction = async (id: string, name: string) => {
-    if (!confirm(`Delete function '${name}'?`)) return;
+    if (!confirm(`Delete function '${name}'?\n\nThis will stop all containers and remove the function permanently.`)) return;
     try {
-      await fetch(`http://localhost:3002/functions/${id}`, { method: "DELETE" });
+      await fetch(`${API_URL}/functions/${id}`, { method: "DELETE" });
       fetchFunctions();
     } catch (e) {
       alert("Failed to delete");
@@ -39,7 +48,7 @@ export default function Dashboard() {
 
   const replenishFunction = async (id: string) => {
     try {
-      await fetch(`http://localhost:3002/warm-pool/${id}/replenish`, { method: "POST" });
+      await fetch(`${API_URL}/warm-pool/${id}/replenish`, { method: "POST" });
       alert("Replenishment triggered");
     } catch (e) {
       alert("Failed to replenish");
@@ -48,7 +57,6 @@ export default function Dashboard() {
 
   const copyToClipboard = (text: string) => {
     navigator.clipboard.writeText(text);
-    // Could add a toast here
   };
 
   return (
@@ -57,6 +65,12 @@ export default function Dashboard() {
         <h1 className="text-3xl font-bold tracking-tight">Functions</h1>
         <p className="text-muted-foreground mt-1">Manage your deployed serverless functions and warm pools.</p>
       </div>
+
+      {error && (
+        <div className="bg-red-500/10 border border-red-500/30 rounded-lg p-4 text-red-500 text-sm">
+          Failed to fetch functions: {error}
+        </div>
+      )}
 
       {loading && functions.length === 0 ? (
         <div className="h-64 flex items-center justify-center border border-border rounded-lg border-dashed">
@@ -92,14 +106,14 @@ export default function Dashboard() {
                     </span>
                   </div>
                   <div className="text-xs text-muted-foreground mb-4 font-mono truncate" title={f.image}>
-                    {f.image.split('/').pop()}
+                    {f.image?.split('/').pop() || 'unknown'}
                   </div>
 
                   <div className="space-y-2 mb-4">
                     <div className="flex items-center gap-2 bg-accent/30 rounded-md px-2 py-1.5 border border-border">
                       <span className="text-[10px] font-bold px-1.5 py-0.5 rounded bg-blue-500/20 text-blue-500">PATH</span>
-                      <span className="text-xs font-mono text-muted-foreground truncate flex-1">{`http://localhost:8081/fn/${f.name}`}</span>
-                      <button onClick={() => copyToClipboard(`http://localhost:8081/fn/${f.name}`)} className="text-muted-foreground hover:text-foreground">
+                      <span className="text-xs font-mono text-muted-foreground truncate flex-1">{`${GATEWAY_URL}/fn/${f.name}`}</span>
+                      <button onClick={() => copyToClipboard(`${GATEWAY_URL}/fn/${f.name}`)} className="text-muted-foreground hover:text-foreground">
                         <Copy size={12} />
                       </button>
                     </div>

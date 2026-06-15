@@ -1,6 +1,9 @@
+import cache from '../cache/cache.js';
 import { apiKeys } from '../db/database.js';
 
-export default function authCheck(req, res, next) {
+const API_KEY_CACHE_TTL = 60; // 60 seconds
+
+export default async function authCheck(req, res, next) {
     const t0 = performance.now();
     const { functionData } = req;
 
@@ -28,8 +31,15 @@ export default function authCheck(req, res, next) {
             return res.status(401).json({ error: "authentication required" });
         }
 
-        // Single atomic DB check: key must exist AND belong to this function
-        const keyData = apiKeys.findByKeyAndFunction(token, functionData.id);
+        // Check cache first, then DB
+        const cacheKey = `key:${token}:${functionData.id}`;
+        let keyData = await cache.get(cacheKey);
+        if (!keyData) {
+            keyData = apiKeys.findByKeyAndFunction(token, functionData.id);
+            if (keyData) {
+                await cache.set(cacheKey, keyData, API_KEY_CACHE_TTL);
+            }
+        }
         if (!keyData) {
             req.log.info({
                 elapsed_ms: +(performance.now() - req.startTime).toFixed(2),

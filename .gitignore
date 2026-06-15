@@ -34,3 +34,9 @@ out/
 # Temp files
 tmp/
 *.tmp
+
+# GCP Service Account Keys (NEVER commit these)
+cobalt-nomad.json
+*iam.gserviceaccount.com*.json
+service-account*.json
+gcp-key*.json

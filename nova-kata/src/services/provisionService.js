@@ -64,6 +64,9 @@ async function provisionWorker({ ip, username, password, ssh_port = 22, onLine }
             log(`✔ ${label}`);
         };
 
+        // ── Step 0: Clean up broken repos from previous attempts ────────────────
+        await run('Clean up broken apt repos', 'rm -f /etc/apt/sources.list.d/nodesource.list /etc/apt/keyrings/nodesource.gpg /etc/apt/sources.list.d/nodesource.repo', 10_000);
+
         // ── Step 1: Dependencies ──────────────────────────────────────────────
         await run('Install dependencies', 'apt-get update -qq && apt-get install -y curl wget tar', 3 * 60_000);
 
@@ -140,6 +143,45 @@ async function provisionWorker({ ip, username, password, ssh_port = 22, onLine }
             '/opt/kata/share/defaults/kata-containers/configuration.toml',
         ].join(' '));
 
+        // ── Step 6b: Enable Memory Ballooning ──────────────────────────────────
+        // reclaim_guest_freed_memory = true attaches virtio-balloon PCI device
+        // and enables free-page-reporting so the host can reclaim unused guest RAM.
+        // Critical for warm pool density — paused containers return free pages to host.
+        await run('Enable Kata memory ballooning', [
+            'sed -i',
+            '"s/^reclaim_guest_freed_memory = false/reclaim_guest_freed_memory = true/"',
+            '/opt/kata/share/defaults/kata-containers/configuration-qemu.toml',
+            '|| true',
+        ].join(' '));
+
+        // ── Step 6b2: Virtio-FS thread pool ────────────────────────────────────
+        // Default is --thread-pool-size=1 which serializes all file reads across
+        // the guest/host boundary. During cold starts, Node.js/Python read thousands
+        // of tiny files (node_modules, site-packages). Single-threaded virtiofsd
+        // is a major I/O bottleneck. Bumping to 4 threads parallelizes reads.
+        await run('Increase virtiofsd thread pool', [
+            'sed -i',
+            '"s/--thread-pool-size=1/--thread-pool-size=4/"',
+            '/opt/kata/share/defaults/kata-containers/configuration-qemu.toml',
+            '|| true',
+        ].join(' '));
+
+        // ── Step 6c: Enable KSM (Kernel Samepage Merging) ──────────────────────
+        // KSM deduplicates identical memory pages across Kata VMs.
+        // With 20 Python warm containers, saves ~500-600MB by deduping guest kernels,
+        // Python interpreter, and nova_agent code.
+        // ksmtuned auto-adjusts scan rate based on host RAM pressure.
+        await run('Enable KSM', [
+            'echo 1 > /sys/kernel/mm/ksm/run &&',
+            'echo 1000 > /sys/kernel/mm/ksm/pages_to_scan &&',
+            'echo 200 > /sys/kernel/mm/ksm/sleep_millisecs',
+        ].join(' '));
+        await run('Install ksmtuned (adaptive KSM)', [
+            'apt-get install -y ksm-tools 2>/dev/null || true &&',
+            'systemctl enable ksmtuned 2>/dev/null || true &&',
+            'systemctl start ksmtuned 2>/dev/null || true',
+        ].join(' '));
+
         // ── Step 7: Configure Containerd ─────────────────────────────────────
         await run('Generate containerd config', [
             'mkdir -p /etc/containerd &&',
@@ -189,18 +231,32 @@ WantedBy=multi-user.target
         );
         await run('Enable BuildKit', 'systemctl daemon-reload && systemctl enable --now buildkit');
 
-        // ── Step 10: Private Registry ─────────────────────────────────────────
-        await run('Start local registry', [
-            'nerdctl inspect nova-registry > /dev/null 2>&1 ||',
-            'nerdctl run -d --name nova-registry -p 5000:5000 --restart always registry:2',
-        ].join(' '));
+        // ── Step 10: Shared Registry Config ────────────────────────────────────
+        // Workers pull/push from the shared registry (REGISTRY_HOST, e.g., 10.128.0.21:5000).
+        // Configure containerd to trust the insecure (HTTP) registry.
+        const registryHost = process.env.REGISTRY_HOST || 'localhost:5000';
+        if (registryHost !== 'localhost:5000') {
+            log(`Configuring shared registry: ${registryHost}`);
+            const hostsToml = Buffer.from(
+                `server = "http://${registryHost}"\n\n[host."http://${registryHost}"]\n  skip_verify = true\n`
+            ).toString('base64');
+            await run(
+                'Add insecure registry to containerd',
+                `mkdir -p /etc/containerd/certs.d/${registryHost} && echo '${hostsToml}' | base64 -d > /etc/containerd/certs.d/${registryHost}/hosts.toml`
+            );
+            await run('Restart containerd for registry', 'systemctl restart containerd');
+        } else {
+            // Dev mode: start a local registry on the worker
+            await run('Start local registry', [
+                'nerdctl inspect nova-registry > /dev/null 2>&1 ||',
+                'nerdctl run -d --name nova-registry -p 5000:5000 --restart always registry:2',
+            ].join(' '));
+        }
 
-        // ── Step 11: Nginx (reverse proxy for container routing) ──────────────
-        // containerService.js writes /etc/nginx/conf.d/nova-*.conf for each
-        // container and calls `nginx -s reload` — nginx must be installed.
-        await run('Install nginx', 'apt-get install -y nginx', 3 * 60_000);
-        await run('Ensure nginx conf.d exists', 'mkdir -p /etc/nginx/conf.d');
-        await run('Enable nginx', 'systemctl enable --now nginx');
+        // ── Step 11: (Removed — Nginx no longer needed) ────────────────────────
+        // Containers now use nerdctl -p port mapping (iptables/NAT).
+        // The gateway routes directly to worker_ip:hostPort.
+        // No nginx install, no config write, no reload thrashing.
 
         // ── Step 12: Network Isolation ────────────────────────────────────────
         // Isolate containers from each other and block access to cloud metadata
@@ -216,7 +272,57 @@ WantedBy=multi-user.target
         //      'iptables-save > /etc/iptables/rules.v4'
         // ].join(' && '));
 
+        // ── Step 13: Worker API ───────────────────────────────────────────────────
+        // Lightweight HTTP agent for container ops (pause/unpause/health/stats).
+        // Eliminates SSH overhead on the hot path.
+        const workerApiKey = process.env.WORKER_API_KEY || 'nova-worker-default-key';
+        const workerApiPort = process.env.WORKER_API_PORT || '3005';
+
+        // Install Node.js (required by Worker API)
+        // Use direct binary download — avoids apt repo/GPG issues with NodeSource.
+        const nodeExists = await ssh.exec('test -x /usr/local/bin/node && echo yes || echo no');
+        if (nodeExists.stdout.trim() !== 'yes') {
+            // Clean up any broken NodeSource repo from previous attempts
+            await run('Clean up NodeSource repo', 'rm -f /etc/apt/sources.list.d/nodesource.list /etc/apt/keyrings/nodesource.gpg /etc/apt/sources.list.d/nodesource.repo', 10_000);
+            // Download Node.js 20 LTS binary directly (no apt, no GPG issues)
+            const NODE_VERSION = '20.11.1';
+            await run('Download Node.js binary', [
+                `wget -q https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-x64.tar.xz`,
+                `-O /tmp/node.tar.xz`,
+            ].join(' '), 60_000);
+            await run('Extract Node.js to /usr/local', 'tar -xJf /tmp/node.tar.xz -C /usr/local --strip-components=1');
+            await run('Verify Node.js', '/usr/local/bin/node --version');
+        } else {
+            log('✔ Node.js already installed — skipping');
+        }
+
+        await run('Create Worker API directory', 'mkdir -p /opt/nova/worker-api');
+
+        // Upload Worker API files via base64 (SSH-safe)
+        const workerApiIndex = require('fs').readFileSync(require('path').join(__dirname, '../../worker-api/index.js'), 'utf8');
+        const workerApiPkg = require('fs').readFileSync(require('path').join(__dirname, '../../worker-api/package.json'), 'utf8');
+        const workerApiService = require('fs').readFileSync(require('path').join(__dirname, '../../worker-api/nova-worker-api.service'), 'utf8');
+
+        await run('Upload Worker API index.js', `echo '${Buffer.from(workerApiIndex).toString('base64')}' | base64 -d > /opt/nova/worker-api/index.js`);
+        await run('Upload Worker API package.json', `echo '${Buffer.from(workerApiPkg).toString('base64')}' | base64 -d > /opt/nova/worker-api/package.json`);
+
+        // Write .env for Worker API (use echo to avoid heredoc issues over SSH)
+        await run('Write Worker API .env', [
+            `echo 'WORKER_API_KEY=${workerApiKey}' > /opt/nova/worker-api/.env`,
+            `&& echo 'WORKER_API_PORT=${workerApiPort}' >> /opt/nova/worker-api/.env`,
+        ].join(' '));
+
+        await run('Install Worker API dependencies', 'cd /opt/nova/worker-api && /usr/local/bin/npm install --production', 120_000);
+
+        // Install systemd service
+        await run('Upload systemd service', `echo '${Buffer.from(workerApiService).toString('base64')}' | base64 -d > /etc/systemd/system/nova-worker-api.service`);
+        await run('Enable and start Worker API', 'systemctl daemon-reload && systemctl enable --now nova-worker-api');
+
+        // Open firewall port for Worker API (internal only)
+        await run('Open Worker API port', `iptables -C INPUT -p tcp --dport ${workerApiPort} -j ACCEPT || iptables -I INPUT -p tcp --dport ${workerApiPort} -j ACCEPT`);
+
         log('🎉 Provisioning complete!');
+
 
     } catch (err) {
         if (err instanceof ProvisionError) throw err;

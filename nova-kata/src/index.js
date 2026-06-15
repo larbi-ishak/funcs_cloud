@@ -82,6 +82,11 @@ const PORT = parseInt(process.env.PORT) || 3002;
 
     process.on('SIGTERM', shutdown);
     process.on('SIGINT', shutdown);
+
+    // Prevent unhandled promise rejections from crashing the process
+    process.on('unhandledRejection', (reason) => {
+        logger.error(`Unhandled rejection: ${reason}`);
+    });
 })();
 
 module.exports = app;

@@ -4,19 +4,24 @@ import logger from '../utils/logger.js';
 import { redis, isRedisReady } from './redisClient.js';
 
 const PLACEMENT_URL = process.env.PLACEMENT_SERVICE_URL || 'http://localhost:3002';
-const IDLE_TTL_SECONDS = parseInt(process.env.CONTAINER_IDLE_TTL) || 30;
+const IDLE_TTL_SECONDS = parseInt(process.env.CONTAINER_IDLE_TTL) || 300;
 const EXPIRY_CHECK_INTERVAL_MS = 10_000; // same as node-cache checkperiod: 10
 
 // ── Expiry handler ────────────────────────────────────────────────────────
 let expiryHandler = null;
 
 async function releaseContainer(key, value) {
-    if (!value || !value.container_id) return;
-    try {
-        await axios.post(`${PLACEMENT_URL}/containers/${value.container_id}/release`);
-        logger.info({ container_id: value.container_id, key }, 'Container released (cache expired)');
-    } catch (_) {
-        // Best-effort — container may have already been removed / crashed
+    if (!value) return;
+    // Support both single-container format { container_id } and pool format { containers: [...] }
+    const entries = value.containers || (value.container_id ? [value] : []);
+    for (const c of entries) {
+        if (!c.container_id) continue;
+        try {
+            await axios.post(`${PLACEMENT_URL}/containers/${c.container_id}/release`);
+            logger.info({ container_id: c.container_id, key }, 'Container released (cache expired)');
+        } catch (_) {
+            // Best-effort — container may have already been removed / crashed
+        }
     }
 }
 
@@ -132,7 +137,7 @@ const cache = {
                 await redis.set(key, JSON.stringify(value), 'EX', ttl);
 
                 // Track container keys in sorted set for expiry handling
-                if (key.startsWith('ct:') && value && value.container_id) {
+                if (key.startsWith('ct:')) {
                     await redis.zadd(EXPIRY_ZSET, Date.now() + (ttl * 1000), key);
                 }
             } catch (err) {

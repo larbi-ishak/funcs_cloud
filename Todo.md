@@ -1,3 +1,14 @@
+## ✅ Security Issues — Resolved
+
+See **[docs/security-audit.md](docs/security-audit.md)** for full details.
+
+- ~~Shell injection risk in `containerService.js`~~ — ✅ Fixed: image name validation added
+- ~~Plaintext worker SSH passwords in SQLite database~~ — ✅ Fixed: AES-256-GCM encryption at rest
+- ~~Leaked credentials in `Todo.md`~~ — ✅ Fixed: credentials removed
+- Exposed GCP service account key (`cobalt-nomad.json`) — removed from git, key rotation still required
+
+---
+
 * Region Selection and Backend creating VMs
 * Auto Scaling Limits
 * Function from :
@@ -9,9 +20,6 @@
 * Limit Storage/CPU
 
 * Authentication
-O6hxEhdRVhv8uD1BRqzmMYAc8ILeAxBXhGnwul1qkUTCbGsRcsZAR2Je4lBTX9w0UyTQWrLgJn3lxdXBNVr7Cg
-
-EcommerceDrs@123
 
 ---
 

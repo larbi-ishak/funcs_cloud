@@ -78,7 +78,7 @@ function initDb() {
         logger.info('Migration: Added gcp_zone to workers table');
     } catch (e) {}
 
-    // Fix legacy image tags: prepend localhost:5000/ to images missing a registry prefix
+    // Fix legacy image tags: prepend REGISTRY_HOST/ to images missing a registry prefix
     try {
         const legacyImages = queryAll(
             "SELECT id, image FROM functions WHERE image IS NOT NULL AND image NOT LIKE '%/%'"
@@ -87,7 +87,7 @@ function initDb() {
             const updateStmt = db.prepare('UPDATE functions SET image = ? WHERE id = ?');
             const updateMany = db.transaction((rows) => {
                 for (const row of rows) {
-                    updateStmt.run(`localhost:5000/${row.image}`, row.id);
+                    updateStmt.run(`${process.env.REGISTRY_HOST || 'localhost:5000'}/${row.image}`, row.id);
                 }
             });
             updateMany(legacyImages);
@@ -175,6 +175,16 @@ const workers = {
         );
     },
 
+    resetFailures(id) {
+        run(
+            `UPDATE workers
+             SET consecutive_failures = 0,
+                 updated_at = datetime('now')
+             WHERE id = ?`,
+            [id]
+        );
+    },
+
     delete(id) {
         run('DELETE FROM workers WHERE id = ?', [id]);
     },
@@ -194,10 +204,10 @@ const containers = {
         const { sql: s, values } = namedToPositional(
             `INSERT INTO containers
              (id, worker_id, container_name, image, runtime, container_ip,
-              host_port, agent_port, status, function_id, metadata)
+              host_port, agent_port, status, function_id, metadata, started_at)
              VALUES
              (@id, @worker_id, @container_name, @image, @runtime, @container_ip,
-              @host_port, @agent_port, @status, @function_id, @metadata)`,
+              @host_port, @agent_port, @status, @function_id, @metadata, @started_at)`,
             c
         );
         run(s, values);
@@ -231,20 +241,19 @@ const containers = {
     },
 
     updateStatus(id, status, extra = {}) {
-        if (['stopped', 'failed'].includes(status)) {
-            run(
-                `UPDATE containers SET status = ?, stopped_at = datetime('now') WHERE id = ?`,
-                [status, id]
-            );
-        } else {
-            run('UPDATE containers SET status = ? WHERE id = ?', [status, id]);
-        }
-        if (extra.container_ip) {
-            run('UPDATE containers SET container_ip = ? WHERE id = ?', [extra.container_ip, id]);
-        }
-        if (extra.host_port) {
-            run('UPDATE containers SET host_port = ? WHERE id = ?', [extra.host_port, id]);
-        }
+        // Single atomic UPDATE — prevents concurrent reads from seeing partial state
+        // COALESCE keeps existing value when the parameter is null (PostgreSQL-compatible)
+        const isTerminal = ['stopped', 'failed'].includes(status);
+        run(
+            `UPDATE containers SET
+                status = ?,
+                container_ip = COALESCE(?, container_ip),
+                host_port = COALESCE(?, host_port),
+                started_at = COALESCE(?, started_at),
+                stopped_at = CASE WHEN ? THEN datetime('now') ELSE stopped_at END
+             WHERE id = ?`,
+            [status, extra.container_ip || null, extra.host_port || null, extra.started_at || null, isTerminal ? 1 : 0, id]
+        );
     },
 
     delete(id) {
@@ -271,37 +280,49 @@ const warmPool = {
     /**
      * Claim a warm container for a given function (or any if function_id is null).
      * Returns the warm_pool row + container data.
+     *
+     * IMPORTANT: SELECT + UPDATE are wrapped in a transaction to prevent
+     * double-claiming under concurrent requests. Without the transaction,
+     * two callers could both SELECT the same 'warm' row before either
+     * UPDATEs it, causing both to be routed to the same container.
+     *
+     * PostgreSQL migration: Replace with SELECT ... FOR UPDATE SKIP LOCKED
+     * which is the standard pattern for work queues.
      */
     claimOne(functionId) {
-        let row;
-        if (functionId) {
-            row = queryOne(
-                `SELECT wp.*, c.container_ip, c.host_port, c.worker_id, c.container_name, c.agent_port
-                 FROM warm_pool wp
-                 JOIN containers c ON c.id = wp.container_id
-                 WHERE wp.function_id = ? AND wp.status = 'warm'
-                 ORDER BY wp.created_at ASC LIMIT 1`,
-                [functionId]
-            );
-        }
-        // Fallback: claim any warm container with no function_id
-        if (!row) {
-            row = queryOne(
-                `SELECT wp.*, c.container_ip, c.host_port, c.worker_id, c.container_name, c.agent_port
-                 FROM warm_pool wp
-                 JOIN containers c ON c.id = wp.container_id
-                 WHERE wp.function_id IS NULL AND wp.status = 'warm'
-                 ORDER BY wp.created_at ASC LIMIT 1`,
-                []
-            );
-        }
-        if (!row) return null;
+        const doClaim = db.transaction(() => {
+            let row;
+            if (functionId) {
+                row = queryOne(
+                    `SELECT wp.*, c.container_ip, c.host_port, c.worker_id, c.container_name, c.agent_port
+                     FROM warm_pool wp
+                     JOIN containers c ON c.id = wp.container_id
+                     WHERE wp.function_id = ? AND wp.status = 'warm'
+                     ORDER BY wp.created_at ASC LIMIT 1`,
+                    [functionId]
+                );
+            }
+            // Fallback: claim any warm container with no function_id
+            if (!row) {
+                row = queryOne(
+                    `SELECT wp.*, c.container_ip, c.host_port, c.worker_id, c.container_name, c.agent_port
+                     FROM warm_pool wp
+                     JOIN containers c ON c.id = wp.container_id
+                     WHERE wp.function_id IS NULL AND wp.status = 'warm'
+                     ORDER BY wp.created_at ASC LIMIT 1`,
+                    []
+                );
+            }
+            if (!row) return null;
 
-        run(
-            `UPDATE warm_pool SET status = 'claimed', claimed_at = datetime('now') WHERE id = ?`,
-            [row.id]
-        );
-        return row;
+            run(
+                `UPDATE warm_pool SET status = 'claimed', claimed_at = datetime('now') WHERE id = ?`,
+                [row.id]
+            );
+            return row;
+        });
+
+        return doClaim();
     },
 
     countWarm(functionId) {
@@ -402,6 +423,36 @@ const functions = {
 
     updateStatus(id, status) {
         run(`UPDATE functions SET status = ?, updated_at = datetime('now') WHERE id = ?`, [status, id]);
+    },
+
+    update(id, fields) {
+        // Atomic update of function fields — only updates provided fields (PostgreSQL-compatible)
+        run(
+            `UPDATE functions SET
+                image = COALESCE(?, image),
+                agent_cmd = COALESCE(?, agent_cmd),
+                agent_port = COALESCE(?, agent_port),
+                env_vars = COALESCE(?, env_vars),
+                memory_limit = COALESCE(?, memory_limit),
+                cpu_limit = COALESCE(?, cpu_limit),
+                storage_limit = COALESCE(?, storage_limit),
+                max_containers = COALESCE(?, max_containers),
+                warm_count = COALESCE(?, warm_count),
+                updated_at = datetime('now')
+             WHERE id = ?`,
+            [
+                fields.image || null,
+                fields.agent_cmd || null,
+                fields.agent_port || null,
+                fields.env_vars || null,
+                fields.memory_limit || null,
+                fields.cpu_limit || null,
+                fields.storage_limit || null,
+                fields.max_containers || null,
+                fields.warm_count || null,
+                id,
+            ]
+        );
     },
 
     delete(id) {
