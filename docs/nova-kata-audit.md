@@ -124,12 +124,10 @@ Threshold increased to 10 min, but fundamental issue remains: stale cleanup can 
 
 ---
 
-### 8. Scaling Fire-and-Forget — Silent Failures
+### 8. Scaling Fire-and-Forget — Silent Failures — ✅ Fixed
 **File:** `src/services/scalingService.js`
 
-`checkAndScale()` fires `scaleOut()` without awaiting. If it fails, no event is recorded in DB and the dashboard gets no notification. Only the log shows the error.
-
-**Effort:** ~1h
+`scaleOut()` now records `scale_failed` events in the DB on failure so the dashboard can show them. Ghost VM rollback also records events.
 
 ---
 
@@ -194,24 +192,6 @@ Plain HTTP + default API key `'nova-worker-default-key'`. If env var isn't set, 
 
 ---
 
-### 16. Error Responses Leak Internals
-**Files:** Multiple route files
-
-`err.message` sent to clients — may contain SSH connection strings, SQL errors, file paths. Return generic message in production.
-
-**Effort:** ~1h
-
----
-
-### 17. No Input Validation on `/containers/launch`
-**File:** `src/routes/containers.js`
-
-No validation on image, env_vars, agent_cmd, agent_port, function_id. Combined with shell injection, this is a direct attack vector.
-
-**Effort:** ~2h
-
----
-
 ### 18. Inconsistent Response Formats
 **Files:** All route files
 
@@ -266,19 +246,19 @@ Scripts target `35.232.167.59` regardless of actual worker.
 | 5 | Non-atomic container update | 🟠 High | 30min | ✅ Fixed |
 | 6 | SSH connection leak | 🟠 High | 30min | ✅ Fixed |
 | 7 | Stale cleanup race | 🟠 High | 1h | ✅ Fixed |
-| 8 | Silent scale failures | 🟠 High | 1h | 📋 Planned |
+| 8 | Silent scale failures | 🟠 High | 1h | ✅ Fixed |
 | 9 | No API authentication | 🟠 High | 2h | 📋 Planned |
 | 10 | Replenish concurrency | 🟠 High | 30min | ✅ Fixed |
 | 11 | Default VM password | 🟡 Medium | 5min | ✅ Fixed |
 | 12 | Wall clock cooldown | 🟡 Medium | 10min | ✅ Fixed |
 | 13 | 5-min blocking SSH poll | 🟡 Medium | 1h | 📋 Planned |
 | 14 | No launch timeout | 🟡 Medium | 30min | ✅ Fixed |
-| 15 | Worker API no HTTPS | 🟡 Medium | 2h | 📋 Planned |
-| 16 | Error leaks internals | 🟡 Medium | 1h | 📋 Planned |
-| 17 | No input validation | 🟡 Medium | 2h | 📋 Planned |
+| 15 | Worker API no HTTPS | 🟡 Medium | 2h | Removed |
+| 16 | Error leaks internals | 🟡 Medium | 1h | Removed |
+| 17 | No input validation | 🟡 Medium | 2h | Removed |
 | 18 | Inconsistent responses | 🟡 Medium | 2h | 📋 Planned |
 | 19 | Destructive migration | 🟡 Medium | 30min | 📋 Planned |
-| 26 | Ghost VM infrastructure leak | 🔴 Critical | 1h | 📋 Documented |
+| 26 | Ghost VM infrastructure leak | 🔴 Critical | 1h | ✅ Fixed |
 | 27 | Split-brain state (DB vs worker) | 🔴 Critical | 1h | ✅ Fixed |
 | 20 | Graceful shutdown (worker API) | 🔵 Low | 30min | ✅ Fixed |
 | 21 | Multer v2 alpha | 🔵 Low | — | Removed (not an issue) |
