@@ -215,12 +215,12 @@ try {
 
 ## 🟠 HIGH — Will Cause Problems Under Load
 
-### 6. SSH Connection Leak on Error in `launchContainer()`
+### 6. SSH Connection Leak on Error in `launchContainer()` — FIXED
 **File:** `src/services/containerService.js`
 
-If an operation throws after `createSSHClient()` but before `ssh.close()`, the SSH connection leaks. Should use try/finally consistently.
+**Problem:** If an operation throws after `createSSHClient()` but before `ssh.close()`, the SSH connection leaks.
 
-**Effort:** ~30min
+**Fix:** Moved SSH connection creation inside `try` block with `let ssh` declared outside. Added `if (ssh) ssh.close()` in `finally` block. Same pattern already used in `unpauseContainer`, `pauseContainer`, `stopContainer`.
 
 ---
 
@@ -262,23 +262,21 @@ If two replenish cycles overlap, they can both try to launch containers for the 
 
 ## 🟡 MEDIUM — Functional Issues
 
-### 11. Hardcoded GCP VM Root Password Default
+### 11. Hardcoded GCP VM Root Password Default — FIXED
 **File:** `src/services/scalingService.js`
-```js
-const ROOT_PASSWORD = process.env.GCP_VM_ROOT_PASSWORD || 'NovaWorker2025!';
-```
-Default password committed in code. Remove default, require env var.
 
-**Effort:** ~5min
+**Problem:** Default password `'NovaWorker2025!'` committed in code.
+
+**Fix:** Removed default. Now throws `Error('GCP_VM_ROOT_PASSWORD env var is required')` if not set.
 
 ---
 
-### 12. Auto-Scale Cooldown — Wall Clock vs Monotonic
+### 12. Auto-Scale Cooldown — Wall Clock vs Monotonic — FIXED
 **File:** `src/services/scalingService.js`
 
-`lastScaleOutAt` uses `Date.now()`. NTP clock jumps can skip or extend cooldown. Use `performance.now()`.
+**Problem:** `lastScaleOutAt` used `Date.now()`. NTP clock jumps can skip or extend cooldown.
 
-**Effort:** ~10min
+**Fix:** Changed to `performance.now()` (monotonic, immune to clock adjustments). `lastScaleOutAt` is now a number (ms) instead of a Date object.
 
 ---
 
@@ -382,13 +380,13 @@ Scripts target `35.232.167.59` regardless of actual worker.
 | 3 | Shell injection (worker API) | 🔴 Critical | 1h | 📋 Documented |
 | 4 | Plaintext password in git | 🔴 Critical | 5min | ✅ Fixed |
 | 5 | Non-atomic container update | 🟠 High | 30min | ✅ Fixed |
-| 6 | SSH connection leak | 🟠 High | 30min | 📋 Planned |
+| 6 | SSH connection leak | 🟠 High | 30min | ✅ Fixed |
 | 7 | Stale cleanup race | 🟠 High | 1h | 🟡 Partial |
 | 8 | Silent scale failures | 🟠 High | 1h | 📋 Planned |
 | 9 | No API authentication | 🟠 High | 2h | 📋 Planned |
 | 10 | Replenish concurrency | 🟠 High | 30min | 📋 Planned |
-| 11 | Default VM password | 🟡 Medium | 5min | 📋 Planned |
-| 12 | Wall clock cooldown | 🟡 Medium | 10min | 📋 Planned |
+| 11 | Default VM password | 🟡 Medium | 5min | ✅ Fixed |
+| 12 | Wall clock cooldown | 🟡 Medium | 10min | ✅ Fixed |
 | 13 | 5-min blocking SSH poll | 🟡 Medium | 1h | 📋 Planned |
 | 14 | No launch timeout | 🟡 Medium | 30min | 📋 Planned |
 | 15 | Worker API no HTTPS | 🟡 Medium | 2h | 📋 Planned |

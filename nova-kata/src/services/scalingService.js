@@ -17,7 +17,7 @@ function cfg() {
         // Minutes of cool-down between scale-out events
         coolDownMinutes   : parseFloat(process.env.SCALE_OUT_COOLDOWN_MIN) || 10,
         // Root password set on newly created GCP VMs
-        rootPassword      : process.env.GCP_VM_ROOT_PASSWORD               || 'NovaWorker2025!',
+        rootPassword      : process.env.GCP_VM_ROOT_PASSWORD               || (function(){ throw new Error('GCP_VM_ROOT_PASSWORD env var is required'); })(),
         // SSH port on newly provisioned workers
         sshPort           : parseInt(process.env.GCP_VM_SSH_PORT)          || 22,
         // Default GCP region for auto-scaled workers
@@ -27,7 +27,7 @@ function cfg() {
 
 // ── In-memory state ───────────────────────────────────────────────────────────
 let scalingInProgress = false;
-let lastScaleOutAt    = null;   // Date | null
+let lastScaleOutAt    = 0;   // monotonic ms from performance.now()
 
 // ── Public API ────────────────────────────────────────────────────────────────
 
@@ -47,7 +47,7 @@ async function checkAndScale() {
 
     // Guard: cool-down
     if (lastScaleOutAt) {
-        const minutesSince = (Date.now() - lastScaleOutAt.getTime()) / 60_000;
+        const minutesSince = (performance.now() - lastScaleOutAt) / 60_000;
         if (minutesSince < cfg().coolDownMinutes) {
             return {
                 triggered: false,
@@ -151,7 +151,7 @@ async function scaleOut({ region, onLine } = {}) {
             message    : `Auto-scaled from region ${region}. GCP instance: ${instanceName} (${zone})`,
         });
 
-        lastScaleOutAt = new Date();
+        lastScaleOutAt = performance.now();
 
         log(`✅ Worker ${worker.id} (${ip}) registered and ready!`);
         logger.info(`[AutoScale] Scale-out complete. New worker: ${worker.id} (${ip})`);
@@ -218,7 +218,7 @@ function getMetrics() {
         thresholdToScaleOut   : cfg().scaleOutThreshold,
         maxWorkers            : cfg().maxWorkers,
         scalingInProgress,
-        lastScaleOutAt        : lastScaleOutAt?.toISOString() || null,
+        lastScaleOutAt        : lastScaleOutAt || null,
     };
 }
 

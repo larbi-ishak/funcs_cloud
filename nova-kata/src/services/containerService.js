@@ -219,15 +219,15 @@ printf '{"container_ip":"%s","host_port":${hostPort},"status":"ok"}\\n' "$CONTAI
         // ── Fallback: SSH ────────────────────────────────────────────────────
         launchVia = 'ssh';
         const t_ssh = performance.now();
-        const ssh = await createSSHClient({
-            ip: worker.ip, username: worker.username,
-            password: worker.password, port: worker.ssh_port,
-        });
-        logTiming(rid, 'ssh_connect', performance.now() - t_launch, {
-            worker_ip: worker.ip, step_ms: +(performance.now() - t_ssh).toFixed(2),
-        });
-
+        let ssh;
         try {
+            ssh = await createSSHClient({
+                ip: worker.ip, username: worker.username,
+                password: worker.password, port: worker.ssh_port,
+            });
+            logTiming(rid, 'ssh_connect', performance.now() - t_launch, {
+                worker_ip: worker.ip, step_ms: +(performance.now() - t_ssh).toFixed(2),
+            });
             const t_script = performance.now();
             // 90s timeout: Kata VM boot can take 5-15s, and nerdctl pause can hang if daemon is busy
             const result = await ssh.exec(`echo '${encoded}' | base64 -d | bash`, 90000);
@@ -262,7 +262,7 @@ printf '{"container_ip":"%s","host_port":${hostPort},"status":"ok"}\\n' "$CONTAI
 
             return containers.findById(containerId);
         } finally {
-            ssh.close();
+            if (ssh) ssh.close();
         }
     } catch (err) {
         const totalMs = +(performance.now() - t_launch).toFixed(2);
