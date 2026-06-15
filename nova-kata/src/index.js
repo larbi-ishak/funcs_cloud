@@ -42,7 +42,17 @@ app.use('/', scalingRouter);      // /scaling/regions, /scaling/metrics, /scalin
 
 // ── Health endpoint ───────────────────────────────────────────────────────────
 app.get('/health', (req, res) => {
-    res.json({ status: 'ok', service: 'nova-kata', timestamp: new Date().toISOString() });
+    const mem = process.memoryUsage();
+    res.json({
+        status: 'ok',
+        service: 'nova-kata',
+        uptime: process.uptime(),
+        memory: {
+            heapUsed: Math.round(mem.heapUsed / 1024 / 1024) + 'MB',
+            rss: Math.round(mem.rss / 1024 / 1024) + 'MB',
+        },
+        timestamp: new Date().toISOString(),
+    });
 });
 
 // ── 404 handler ───────────────────────────────────────────────────────────────

@@ -6,6 +6,9 @@ const logger = require('../utils/logger');
 const WARM_POOL_MIN = parseInt(process.env.WARM_POOL_MIN) || 2;
 const WARM_POOL_MAX = parseInt(process.env.WARM_POOL_MAX) || 10;
 
+// Concurrency guard: prevents overlapping replenish cycles for the same function
+const _replenishing = new Set();
+
 /**
  * Claim a warm container for a request.
  *
@@ -89,6 +92,15 @@ async function claimWarmContainer(functionId) {
  * Replenish the warm pool to maintain the minimum number of paused containers.
  */
 async function replenishPool(functionId) {
+    // Concurrency guard: skip if already replenishing this function
+    const key = functionId || '__generic__';
+    if (_replenishing.has(key)) {
+        logger.debug(`Warm pool: replenish already in progress for ${key} — skipping`);
+        return;
+    }
+    _replenishing.add(key);
+
+    try {
     const func = functionId ? functions.findById(functionId) : null;
     const minWarm = func && func.warm_count !== undefined ? func.warm_count : WARM_POOL_MIN;
     const maxContainers = func && func.max_containers !== undefined ? func.max_containers : WARM_POOL_MAX;
@@ -136,6 +148,9 @@ async function replenishPool(functionId) {
         } catch (err) {
             logger.error(`Warm pool: failed to create warm container (${i + 1}/${toCreate}): ${err.message}`);
         }
+    }
+    } finally {
+        _replenishing.delete(key);
     }
 }
 

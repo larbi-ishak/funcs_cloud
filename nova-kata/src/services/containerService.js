@@ -42,6 +42,7 @@ function validateImageName(image) {
 const DEFAULT_SNAPSHOTTER = process.env.DEFAULT_SNAPSHOTTER || 'overlayfs';
 const DEFAULT_AGENT_CMD = process.env.DEFAULT_AGENT_CMD || 'python3 /nova_agent.py';
 const DEFAULT_AGENT_PORT = parseInt(process.env.DEFAULT_AGENT_PORT) || 8080;
+const LAUNCH_TIMEOUT_MS = parseInt(process.env.LAUNCH_TIMEOUT_MS) || 120000; // 2min overall timeout
 
 // ── Shell injection prevention ────────────────────────────────────────────────
 // Env var keys must be valid shell identifiers
@@ -66,6 +67,16 @@ function shellEscape(str) {
  * @returns {object} container record
  */
 async function launchContainer(workerId, options = {}) {
+    // Wrap entire launch in a timeout to prevent indefinite hangs
+    return Promise.race([
+        _launchContainer(workerId, options),
+        new Promise((_, reject) =>
+            setTimeout(() => reject(new Error(`Launch timed out after ${LAUNCH_TIMEOUT_MS}ms`)), LAUNCH_TIMEOUT_MS)
+        ),
+    ]);
+}
+
+async function _launchContainer(workerId, options = {}) {
     const t_launch = performance.now();
     const worker = workers.findById(workerId);
     if (!worker) throw new Error(`Worker ${workerId} not found`);

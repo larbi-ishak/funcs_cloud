@@ -160,7 +160,7 @@ try {
 
 ---
 
-### 7. Stale Cleanup Race Condition (Partially Fixed)
+### 7. Stale Cleanup Race Condition (Partially Fixed) — ✅ Fixed
 **File:** `src/services/monitoringService.js`
 
 Threshold increased to 10 min, but fundamental issue remains: stale cleanup can mark a container as failed while its launch is still in progress. Better fix: track in-flight launches in memory (`Set` of container IDs) and skip stale cleanup for those.
@@ -187,12 +187,10 @@ Zero auth middleware. Anyone who can reach `localhost:3002` can launch container
 
 ---
 
-### 10. `warmPool.replenish()` — No Concurrency Guard
+### 10. `warmPool.replenish()` — No Concurrency Guard — ✅ Fixed
 **File:** `src/services/warmPoolService.js`
 
-If two replenish cycles overlap, they can both try to launch containers for the same function, creating duplicates. Add an in-memory `Set` tracking functions currently being replenished.
-
-**Effort:** ~30min
+Added in-memory `Set` (`_replenishing`) tracking functions currently being replenished. If a replenish is already in progress for a function, subsequent calls are skipped.
 
 ---
 
@@ -225,12 +223,10 @@ Blocks for up to 5 min if VM never becomes reachable. `scalingInProgress = true`
 
 ---
 
-### 14. Container Launch — No Timeout on Full Launch Sequence
+### 14. Container Launch — No Timeout on Full Launch Sequence — ✅ Fixed
 **File:** `src/services/containerService.js`
 
-No overall timeout on `launchContainer()`. A stuck containerd can make this hang indefinitely. Wrap in `Promise.race()` with configurable timeout.
-
-**Effort:** ~30min
+Wrapped `launchContainer()` in `Promise.race()` with configurable timeout (`LAUNCH_TIMEOUT_MS` env var, default 120s). Renamed inner logic to `_launchContainer()`.
 
 ---
 
@@ -281,26 +277,23 @@ Drops and recreates tables. No `--dry-run`, no confirmation, no backup.
 
 ## 🔵 LOW — Code Quality
 
-### 20. No Graceful Shutdown in Worker API
+### 20. No Graceful Shutdown in Worker API — ✅ Fixed
 **File:** `worker-api/index.js`
 
-No SIGTERM/SIGINT handler. In-flight requests killed mid-execution on restart.
-
-### 21. Multer v2 (Alpha) in package.json
-`multer@^2.1.1` is alpha/beta. Pin to stable v1.x.
+Added SIGTERM/SIGINT handler with graceful shutdown: stops accepting new connections, waits for in-flight requests, force-exits after 10s if connections don't drain.
 
 ### 22. SSH `exec()` Timeout — Silent Truncation
 **File:** `src/utils/ssh.js`
 
 Timeout error doesn't distinguish between "command timed out" and "command failed".
 
-### 23. No Health Endpoint on Placement Service
+### 23. No Health Endpoint on Placement Service — ✅ Fixed
 **File:** `src/index.js`
 
-No `/health` for container orchestrators or load balancers.
+`/health` endpoint already existed. Enhanced with `uptime` and `memory` fields for better observability.
 
-### 24. `kill-zombies.js` — No Dry Run
-Script kills processes matching a pattern. No `--dry-run` mode.
+### 24. `kill-zombies.js` — No Dry Run — ✅ Fixed
+Added `--dry-run` flag that shows what would be killed without actually killing. Also added `--ip=<IP>` flag to override the hardcoded worker IP.
 
 ### 25. Hardcoded IPs in `clean-nginx.js`, `clean-nginx-nerdctl.js`
 Scripts target `35.232.167.59` regardless of actual worker.
@@ -317,14 +310,14 @@ Scripts target `35.232.167.59` regardless of actual worker.
 | 4 | Plaintext password in git | 🔴 Critical | 5min | ✅ Fixed |
 | 5 | Non-atomic container update | 🟠 High | 30min | ✅ Fixed |
 | 6 | SSH connection leak | 🟠 High | 30min | ✅ Fixed |
-| 7 | Stale cleanup race | 🟠 High | 1h | 🟡 Partial |
+| 7 | Stale cleanup race | 🟠 High | 1h | ✅ Fixed |
 | 8 | Silent scale failures | 🟠 High | 1h | 📋 Planned |
 | 9 | No API authentication | 🟠 High | 2h | 📋 Planned |
-| 10 | Replenish concurrency | 🟠 High | 30min | 📋 Planned |
+| 10 | Replenish concurrency | 🟠 High | 30min | ✅ Fixed |
 | 11 | Default VM password | 🟡 Medium | 5min | ✅ Fixed |
 | 12 | Wall clock cooldown | 🟡 Medium | 10min | ✅ Fixed |
 | 13 | 5-min blocking SSH poll | 🟡 Medium | 1h | 📋 Planned |
-| 14 | No launch timeout | 🟡 Medium | 30min | 📋 Planned |
+| 14 | No launch timeout | 🟡 Medium | 30min | ✅ Fixed |
 | 15 | Worker API no HTTPS | 🟡 Medium | 2h | 📋 Planned |
 | 16 | Error leaks internals | 🟡 Medium | 1h | 📋 Planned |
 | 17 | No input validation | 🟡 Medium | 2h | 📋 Planned |
@@ -332,4 +325,9 @@ Scripts target `35.232.167.59` regardless of actual worker.
 | 19 | Destructive migration | 🟡 Medium | 30min | 📋 Planned |
 | 26 | Ghost VM infrastructure leak | 🔴 Critical | 1h | 📋 Documented |
 | 27 | Split-brain state (DB vs worker) | 🔴 Critical | 1h | ✅ Fixed |
-| 20-25 | Code quality (low) | 🔵 Low | ~3h | 📋 Planned |
+| 20 | Graceful shutdown (worker API) | 🔵 Low | 30min | ✅ Fixed |
+| 21 | Multer v2 alpha | 🔵 Low | — | Removed (not an issue) |
+| 22 | SSH timeout truncation | 🔵 Low | 15min | 📋 Planned |
+| 23 | Health endpoint | 🔵 Low | 15min | ✅ Fixed |
+| 24 | kill-zombies dry run | 🔵 Low | 15min | ✅ Fixed |
+| 25 | Hardcoded IPs in scripts | 🔵 Low | 15min | 📋 Planned |

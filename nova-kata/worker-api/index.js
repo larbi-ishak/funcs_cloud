@@ -413,6 +413,30 @@ app.post('/launch', async (req, res) => {
 });
 
 // ── Start ───────────────────────────────────────────────────────────────────
-app.listen(PORT, '0.0.0.0', () => {
+const server = app.listen(PORT, '0.0.0.0', () => {
     console.log(`Nova Worker API listening on 0.0.0.0:${PORT}`);
 });
+
+// ── Graceful Shutdown ───────────────────────────────────────────────────────
+let isShuttingDown = false;
+
+const shutdown = (signal) => {
+    if (isShuttingDown) return;
+    isShuttingDown = true;
+    console.log(`\n${signal} received — shutting down gracefully...`);
+
+    // Stop accepting new connections
+    server.close(() => {
+        console.log('All connections closed. Exiting.');
+        process.exit(0);
+    });
+
+    // Force exit after 10s if connections don't drain
+    setTimeout(() => {
+        console.log('Forcing exit — connections did not drain in 10s');
+        process.exit(1);
+    }, 10000);
+};
+
+process.on('SIGTERM', () => shutdown('SIGTERM'));
+process.on('SIGINT', () => shutdown('SIGINT'));
