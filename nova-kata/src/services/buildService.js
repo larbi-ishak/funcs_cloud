@@ -436,7 +436,12 @@ async function deleteFunctionResources(worker, funcName, containerNames = []) {
         logger.info(`[delete:${funcName}] Removing build directory ${buildDir}`);
         await ssh.exec(`rm -rf ${buildDir}`);
 
-        logger.info(`[delete:${funcName}] ✅ All resources removed`);
+        // Remove per-function network (isolated CNI bridge)
+        const networkName = `nova-net-${funcName}`;
+        logger.info(`[delete:${funcName}] Removing network ${networkName}`);
+        await ssh.exec(`nerdctl network rm ${networkName} 2>/dev/null || true`);
+
+        logger.info(`[delete:${funcName}] ✅ All resources removed (containers, image, build dir, network)`);
     } finally {
         ssh.close();
     }

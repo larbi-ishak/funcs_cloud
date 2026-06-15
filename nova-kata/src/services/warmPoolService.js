@@ -69,6 +69,7 @@ async function claimWarmContainer(functionId) {
         cpu_limit: func ? func.cpu_limit : undefined,
         storage_limit: func ? func.storage_limit : undefined,
         function_id: functionId,
+        function_name: func ? func.name : null,
         pause_after: false,
     });
 
@@ -134,6 +135,7 @@ async function replenishPool(functionId) {
                 cpu_limit: func ? func.cpu_limit : undefined,
                 storage_limit: func ? func.storage_limit : undefined,
                 function_id: functionId,
+                function_name: func ? func.name : null,
                 pause_after: true,
             });
 

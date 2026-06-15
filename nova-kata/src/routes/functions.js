@@ -126,10 +126,6 @@ router.get('/functions/:id/stats', async (req, res) => {
                     container_id: c.id,
                     container_name: c.container_name,
                     status: c.status,
-                    cpu_percent: stats?.cpu_percent || 0,
-                    memory_used_bytes: stats?.memory_used_bytes || 0,
-                    memory_limit_bytes: stats?.memory_limit_bytes || 0,
-                    memory_percent: stats?.memory_percent || 0,
                     pids: stats?.pids || 0,
                 });
             }
@@ -140,10 +136,6 @@ router.get('/functions/:id/stats', async (req, res) => {
                     container_id: c.id,
                     container_name: c.container_name,
                     status: c.status,
-                    cpu_percent: 0,
-                    memory_used_bytes: 0,
-                    memory_limit_bytes: 0,
-                    memory_percent: 0,
                     pids: 0,
                 });
             }
@@ -152,9 +144,8 @@ router.get('/functions/:id/stats', async (req, res) => {
 
     // Aggregate
     const aggregated = {
-        cpu_percent: containerStats.reduce((sum, c) => sum + c.cpu_percent, 0),
-        memory_used_bytes: containerStats.reduce((sum, c) => sum + c.memory_used_bytes, 0),
-        memory_limit_bytes: containerStats.reduce((sum, c) => sum + c.memory_limit_bytes, 0),
+        total_containers: containerStats.length,
+        running_containers: containerStats.filter(c => c.status === 'running').length,
     };
 
     return res.json({

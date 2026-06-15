@@ -216,6 +216,11 @@ async function reconcileWorkerContainers(worker) {
     const expected = containers.findByWorker(worker.id);
     let reconciled = 0;
 
+    // Build a set of container names that the DB knows about for this worker
+    const dbContainerNames = new Set(
+        expected.map(c => c.container_name)
+    );
+
     for (const c of expected) {
         // Skip containers being launched — they won't be visible on worker yet
         if (c.status === 'creating') continue;
@@ -229,10 +234,18 @@ async function reconcileWorkerContainers(worker) {
             warmPool.deleteByContainer(c.id);
             reconciled++;
         } else if (actualStatus.startsWith('Exited') || actualStatus === 'Dead') {
-            // Dead on worker but DB says alive → mark failed
-            logger.warn(`[Reconcile] ${c.container_name} exited on worker but DB says ${c.status} → failed`);
+            // Dead on worker but DB says alive → mark failed and remove from worker
+            logger.warn(`[Reconcile] ${c.container_name} exited on worker but DB says ${c.status} → failed, removing`);
             containers.updateStatus(c.id, 'failed');
             warmPool.deleteByContainer(c.id);
+            try {
+                await workerApiClient.post(
+                    `http://${worker.ip}:${WORKER_API_PORT}/stop`,
+                    { container_name: c.container_name }
+                );
+            } catch (stopErr) {
+                logger.warn(`[Reconcile] Failed to remove dead container ${c.container_name}: ${stopErr.message}`);
+            }
             reconciled++;
         } else if (actualStatus.startsWith('Up') && c.status === 'paused') {
             // Running on worker but DB says paused → update DB
@@ -247,6 +260,28 @@ async function reconcileWorkerContainers(worker) {
         }
     }
 
+    // ── Remove orphaned containers on worker (not in DB at all) ──────────────
+    // These are leftover containers from failed/crashed deployments that were
+    // cleaned up in the DB but never removed from the worker. They cause
+    // "name already used" errors on re-deploy.
+    for (const [name, status] of actualMap) {
+        // Only clean up Nova-managed containers (prefixed with "nova-")
+        if (!name.startsWith('nova-')) continue;
+        // Skip if DB knows about this container
+        if (dbContainerNames.has(name)) continue;
+
+        logger.warn(`[Reconcile] Orphaned container ${name} (${status}) on worker ${worker.ip} — removing`);
+        try {
+            await workerApiClient.post(
+                `http://${worker.ip}:${WORKER_API_PORT}/stop`,
+                { container_name: name }
+            );
+            reconciled++;
+        } catch (stopErr) {
+            logger.warn(`[Reconcile] Failed to remove orphaned container ${name}: ${stopErr.message}`);
+        }
+    }
+
     return reconciled;
 }
 
@@ -255,14 +290,14 @@ async function reconcileWorkerContainers(worker) {
  * Notify the gateway to invalidate its container cache when a worker is deleted.
  * This prevents the gateway from routing to dead containers for up to 30s (TTL).
  */
-async function invalidateGatewayCache() {
+async function invalidateGatewayCache(functionName) {
     const gatewayUrl = process.env.GATEWAY_URL;
     if (!gatewayUrl) return; // Gateway URL not configured — skip
 
-    try {
-        const http = require('http');
-        const url = new URL('/internal/invalidate', gatewayUrl);
+    const http = require('http');
+    const url = new URL('/internal/invalidate', gatewayUrl);
 
+    const invalidate = async (body) => {
         await new Promise((resolve, reject) => {
             const req = http.request({
                 hostname: url.hostname,
@@ -272,19 +307,38 @@ async function invalidateGatewayCache() {
                 headers: { 'Content-Type': 'application/json' },
                 timeout: 5000,
             }, (res) => {
-                res.resume(); // drain response
+                res.resume();
                 if (res.statusCode >= 200 && res.statusCode < 300) resolve();
                 else reject(new Error(`Gateway returned ${res.statusCode}`));
             });
             req.on('error', reject);
             req.on('timeout', () => { req.destroy(); reject(new Error('timeout')); });
-            req.write(JSON.stringify({ prefix: 'ct:' }));
+            req.write(JSON.stringify(body));
             req.end();
         });
+    };
 
-        logger.info('[GatewayCache] Invalidated container cache on gateway');
+    // Invalidate container cache (ct: prefix) — always
+    try {
+        await invalidate({ prefix: 'ct:' });
+        logger.info('[GatewayCache] Invalidated container cache (ct:) on gateway');
     } catch (err) {
-        logger.debug(`[GatewayCache] Invalidation failed: ${err.message}`);
+        logger.debug(`[GatewayCache] Container cache invalidation failed: ${err.message}`);
+    }
+
+    // Invalidate function metadata cache (fn: prefix) — critical for re-deploys
+    // When a function is deleted and re-deployed, the gateway may cache the OLD
+    // function ID. Invalidating fn: ensures the gateway fetches fresh metadata.
+    try {
+        if (functionName) {
+            await invalidate({ key: `fn:${functionName}` });
+            logger.info(`[GatewayCache] Invalidated function cache (fn:${functionName}) on gateway`);
+        } else {
+            await invalidate({ prefix: 'fn:' });
+            logger.info('[GatewayCache] Invalidated all function cache (fn:) on gateway');
+        }
+    } catch (err) {
+        logger.debug(`[GatewayCache] Function cache invalidation failed: ${err.message}`);
     }
 }
 

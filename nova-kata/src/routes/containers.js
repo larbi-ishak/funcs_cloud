@@ -17,7 +17,27 @@ const logger = require('../utils/logger');
  */
 router.post('/execute', async (req, res) => {
     try {
-        const result = await claimWarmContainer(req.body.function_id || null);
+        const functionId = req.body.function_id || null;
+
+        // Validate function exists before claiming — prevents FK constraint errors
+        // when the gateway has a stale cached function_id from a deleted+re-deployed function
+        if (functionId) {
+            const { functions } = require('../db/database');
+            const func = functions.findById(functionId);
+            if (!func) {
+                logger.warn(`Execute rejected: function_id ${functionId} not found (stale gateway cache?)`);
+                return res.status(404).json({
+                    error: `Function not found: ${functionId}`,
+                    hint: 'Gateway cache may be stale — invalidate fn: and ct: cache entries',
+                });
+            }
+            if (func.status !== 'active') {
+                logger.warn(`Execute rejected: function ${functionId} status is '${func.status}'`);
+                return res.status(404).json({ error: `Function not available: status='${func.status}'` });
+            }
+        }
+
+        const result = await claimWarmContainer(functionId);
         return res.status(200).json({ success: true, container: result });
     } catch (err) {
         logger.error(`Execute failed: ${err.message}`);
@@ -49,6 +69,7 @@ router.post('/containers/launch', async (req, res) => {
             image: req.body.image,
             env_vars: req.body.env_vars,
             function_id: req.body.function_id,
+            function_name: req.body.function_name || null,
             agent_cmd: req.body.agent_cmd,
             agent_port: req.body.agent_port,
             pause_after: req.body.pause_after || false,

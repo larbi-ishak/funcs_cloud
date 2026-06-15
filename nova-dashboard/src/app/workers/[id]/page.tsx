@@ -232,8 +232,6 @@ export default function WorkerDetailPage() {
                   <th className="text-left px-5 py-3 font-medium">Function</th>
                   <th className="text-left px-5 py-3 font-medium">Port</th>
                   <th className="text-left px-5 py-3 font-medium">IP</th>
-                  <th className="text-left px-5 py-3 font-medium">CPU</th>
-                  <th className="text-left px-5 py-3 font-medium">RAM</th>
                   <th className="text-left px-5 py-3 font-medium">Started</th>
                 </tr>
               </thead>
@@ -254,12 +252,6 @@ export default function WorkerDetailPage() {
                     <td className="px-5 py-3">{c.function_name || "—"}</td>
                     <td className="px-5 py-3 font-mono text-xs">{c.host_port}</td>
                     <td className="px-5 py-3 font-mono text-xs">{c.container_ip || "—"}</td>
-                    <td className="px-5 py-3 font-mono text-xs text-blue-500">
-                      {c.cpu_percent !== undefined ? `${c.cpu_percent.toFixed(1)}%` : "—"}
-                    </td>
-                    <td className="px-5 py-3 font-mono text-xs text-green-500">
-                      {c.memory_used_bytes ? `${formatBytes(c.memory_used_bytes)}` : "—"}
-                    </td>
                     <td className="px-5 py-3 text-muted-foreground text-xs">
                       {c.started_at ? timeAgo(c.started_at) : "—"}
                     </td>

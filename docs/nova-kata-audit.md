@@ -60,6 +60,32 @@ Uses Worker API (HTTP, ~5ms) instead of SSH (~200ms). Feature-flagged via `RECON
 
 **Worker API endpoint added:** `GET /ps` — returns `nerdctl ps -a` container names and statuses.
 
+**Enhanced (2026-06-15):** Reconciliation loop now also:
+- **Removes dead containers from workers** (previously only marked DB as failed, left the container on the worker)
+- **Removes orphaned containers** — containers on the worker that have no matching DB record (leftover from failed deployments). These caused "name already used" errors on re-deploy.
+
+**Idempotent launch (2026-06-15):** `containerService.js` launch script now runs `nerdctl rm -f <name> 2>/dev/null || true` before `nerdctl run` to remove any stale container with the same name. This prevents "name already used" errors even if the reconciliation loop hasn't run yet.
+
+---
+
+### 28. Stale Gateway Cache After Function Re-Deploy — FIXED
+**Severity:** 🔴 Critical
+**Files:** `nova-kata/src/services/monitoringService.js`, `nova-kata/src/routes/deploy.js`, `nova-kata-gateway/src/middleware/containerStateCheck.js`, `nova-kata/src/routes/containers.js`
+
+**Problem:** When a function was deleted and re-deployed with the same name, the gateway cached the OLD function ID. The new deployment created a NEW function ID. The gateway sent the stale ID to the placement service, which tried to INSERT a container with the old `function_id` → FOREIGN KEY constraint failed → 500 error. The gateway never invalidated its cache, so ALL subsequent requests also failed until the cache TTL expired (1 hour) or the gateway was restarted.
+
+**Fix — 5 layers of defense:**
+
+1. **`invalidateGatewayCache(functionName)`** now invalidates BOTH `ct:` (container cache) AND `fn:` (function metadata cache). If a function name is provided, it invalidates the specific key `fn:<name>`.
+
+2. **DELETE route** now calls `invalidateGatewayCache(func.name)` after purging the function record.
+
+3. **Deploy route** passes `functionName` to `invalidateGatewayCache(functionName)` on re-deploy.
+
+4. **Gateway self-heal:** `containerStateCheck.js` detects 404/500 from placement and auto-invalidates `fn:<name>` and `ct:<name>` cache entries. Next request fetches fresh metadata.
+
+5. **Execute endpoint validation:** `POST /execute` validates `function_id` exists before claiming. Returns 404 with hint instead of FK constraint 500.
+
 ---
 
 ## 📋 Documented Issues (Not Yet Implemented)
@@ -260,6 +286,7 @@ Scripts target `35.232.167.59` regardless of actual worker.
 | 19 | Destructive migration | 🟡 Medium | 30min | 📋 Planned |
 | 26 | Ghost VM infrastructure leak | 🔴 Critical | 1h | ✅ Fixed |
 | 27 | Split-brain state (DB vs worker) | 🔴 Critical | 1h | ✅ Fixed |
+| 28 | Stale gateway cache on re-deploy | 🔴 Critical | 1h | ✅ Fixed |
 | 20 | Graceful shutdown (worker API) | 🔵 Low | 30min | ✅ Fixed |
 | 21 | Multer v2 alpha | 🔵 Low | — | Removed (not an issue) |
 | 22 | SSH timeout truncation | 🔵 Low | 15min | 📋 Planned |

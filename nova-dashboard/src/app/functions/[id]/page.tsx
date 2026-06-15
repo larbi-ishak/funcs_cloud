@@ -141,11 +141,6 @@ export default function FunctionDetailsPage() {
           <div className="flex-1">
             <div className="text-xs text-muted-foreground">Memory Limit</div>
             <div className="font-semibold">{mem >= 1024 ? `${mem/1024} GB` : `${mem} MB`}</div>
-            {liveStats?.aggregated?.memory_used_bytes > 0 && (
-              <div className="text-xs text-green-500 mt-1">
-                Using {formatBytes(liveStats.aggregated.memory_used_bytes)} live
-              </div>
-            )}
           </div>
         </div>
         <div className="bg-card border border-border p-4 rounded-xl shadow-sm flex items-center gap-3">
@@ -153,11 +148,6 @@ export default function FunctionDetailsPage() {
           <div className="flex-1">
             <div className="text-xs text-muted-foreground">vCPU Limit</div>
             <div className="font-semibold">{cpu} vCPU</div>
-            {liveStats?.aggregated?.cpu_percent > 0 && (
-              <div className="text-xs text-blue-500 mt-1">
-                {liveStats.aggregated.cpu_percent.toFixed(1)}% used live
-              </div>
-            )}
           </div>
         </div>
         <div className="bg-card border border-border p-4 rounded-xl shadow-sm flex items-center gap-3">
@@ -182,25 +172,15 @@ export default function FunctionDetailsPage() {
                 <tr>
                   <th className="px-6 py-3 font-medium">Container</th>
                   <th className="px-6 py-3 font-medium">Status</th>
-                  <th className="px-6 py-3 font-medium">CPU %</th>
-                  <th className="px-6 py-3 font-medium">RAM Used</th>
-                  <th className="px-6 py-3 font-medium">RAM Limit</th>
                   <th className="px-6 py-3 font-medium">PIDs</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-border">
-                {liveStats.containers.map((c: any) => (
+                {liveStats!.containers.map((c: any) => (
                   <tr key={c.container_id} className="hover:bg-accent/10 transition-colors">
                     <td className="px-6 py-3 font-mono text-xs">{c.container_name}</td>
                     <td className="px-6 py-3">
                       <StatusBadge status={c.status} />
-                    </td>
-                    <td className="px-6 py-3 font-mono text-xs text-blue-500">{c.cpu_percent.toFixed(1)}%</td>
-                    <td className="px-6 py-3 font-mono text-xs text-green-500">
-                      {c.memory_used_bytes ? formatBytes(c.memory_used_bytes) : "—"}
-                    </td>
-                    <td className="px-6 py-3 font-mono text-xs">
-                      {c.memory_limit_bytes ? formatBytes(c.memory_limit_bytes) : "—"}
                     </td>
                     <td className="px-6 py-3 font-mono text-xs">{c.pids || "—"}</td>
                   </tr>

@@ -2,7 +2,7 @@ import type { Metadata } from "next";
 import { Inter } from "next/font/google";
 import "./globals.css";
 import Link from "next/link";
-import { LayoutDashboard, Rocket, Server, Activity } from "lucide-react";
+import { LayoutDashboard, Rocket, Server } from "lucide-react";
 import ThemeToggle from "../components/ThemeToggle";
 import { Toaster } from "sonner";
 
@@ -43,10 +43,6 @@ export default function RootLayout({
             <Link href="/workers" className="flex items-center gap-3 px-3 py-2 rounded-md hover:bg-accent text-sm font-medium transition-colors">
               <Server size={18} />
               Worker Pool
-            </Link>
-            <Link href="/metrics" className="flex items-center gap-3 px-3 py-2 rounded-md hover:bg-accent text-sm font-medium transition-colors">
-              <Activity size={18} />
-              Metrics
             </Link>
           </nav>
           <div className="p-4 border-t border-border">

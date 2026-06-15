@@ -132,7 +132,13 @@ app.get('/ps', async (req, res) => {
 
 // ── GET /stats ──────────────────────────────────────────────────────────────
 app.get('/stats', async (req, res) => {
-    const result = { containers: { running: 0, paused: 0, total: 0 }, memory: {}, cpu: {}, disk: {} };
+    const result = { containers: { running: 0, paused: 0, total: 0 }, memory: {}, cpu: {}, disk: {}, containerd_version: '' };
+
+    // Get containerd version (best-effort)
+    try {
+        const { stdout } = await execPromise('containerd --version 2>/dev/null || ctr version 2>/dev/null', { timeout: 5000 });
+        result.containerd_version = stdout.trim().split('\n')[0]; // first line only
+    } catch (_) {}
 
     // Container counts
     try {
@@ -202,47 +208,156 @@ app.get('/stats', async (req, res) => {
 });
 
 // ── GET /container-stats ────────────────────────────────────────────────────
-// Returns per-container CPU and memory usage via nerdctl stats
+// Returns per-container CPU and memory usage.
+// For Kata (QEMU) containers, nerdctl stats reads the QEMU cgroup — not the
+// workload inside the VM.  We use `nerdctl exec` to read /proc/meminfo and
+// count PIDs from inside the guest for accurate memory/PID metrics.
+// CPU % still comes from nerdctl stats (QEMU CPU is at least indicative).
+// For paused (warm) containers, we briefly unpause → exec → re-pause to
+// read stats without leaving the container in a running state.
 app.get('/container-stats', async (req, res) => {
+    // Step 1: Get baseline stats from nerdctl stats (cgroup-level)
+    let baselineMap = new Map();
     try {
         const { stdout } = await execPromise(
             'nerdctl stats --no-stream --format json 2>/dev/null',
             { timeout: 15000 }
         );
         try {
-            // nerdctl >= 1.7 returns JSON array
-            const stats = JSON.parse(stdout);
-            const containers = stats.map(s => ({
-                name: s.Name || '',
-                cpu_percent: parseFloat(s.CPUPerc) || 0,
-                memory_used_bytes: parseMemBytes(s.MemUsage),
-                memory_limit_bytes: parseMemLimit(s.MemUsage),
-                memory_percent: parseFloat(s.MemPerc) || 0,
-                pids: parseInt(s.PIDs) || 0,
-                net_io: s.NetIO || '',
-                block_io: s.BlockIO || '',
-            }));
-            res.json({ containers });
+            // Handle both JSON array and JSONL (one JSON object per line)
+            let stats;
+            const trimmed = stdout.trim();
+            if (trimmed.startsWith('[')) {
+                stats = JSON.parse(trimmed);
+            } else {
+                stats = trimmed.split('\n').filter(Boolean).map(line => JSON.parse(line));
+            }
+            for (const s of stats) {
+                baselineMap.set(s.Name || '', {
+                    cpu_percent: parseFloat(s.CPUPerc) || 0,
+                    memory_used_bytes: parseMemBytes(s.MemUsage),
+                    memory_limit_bytes: parseMemLimit(s.MemUsage),
+                    memory_percent: parseFloat(s.MemPerc) || 0,
+                    pids: parseInt(s.PIDs) || 0,
+                    net_io: s.NetIO || '',
+                    block_io: s.BlockIO || '',
+                });
+            }
         } catch (_) {
-            // Fallback: parse text table format
-            const lines = stdout.trim().split('\n').filter(l => l.trim());
-            const containers = [];
-            // Skip header line
-            for (let i = 1; i < lines.length; i++) {
-                const parts = lines[i].split(/\s+/);
-                if (parts.length >= 4) {
-                    containers.push({
-                        name: parts[1] || '',
-                        cpu_percent: parseFloat(parts[2]) || 0,
-                        memory_percent: parseFloat(parts[4]) || 0,
-                    });
+            // text table fallback — skip, baseline stays empty
+        }
+    } catch (_) {}
+
+    // Step 2: Get list of all containers with their status
+    let psList = [];
+    try {
+        const { stdout } = await execPromise(
+            "nerdctl ps -a --format '{{.Names}}|{{.Status}}'",
+            { timeout: 10000 }
+        );
+        psList = stdout.trim().split('\n').filter(Boolean).map(line => {
+            const sep = line.indexOf('|');
+            return {
+                name: sep > 0 ? line.slice(0, sep) : line,
+                status: sep > 0 ? line.slice(sep + 1) : 'unknown',
+                running: sep > 0 && line.slice(sep + 1).startsWith('Up'),
+                paused: sep > 0 && line.slice(sep + 1).startsWith('Paused'),
+            };
+        });
+    } catch (_) {}
+
+    // Step 3: For running containers, exec into the VM to get real memory/PIDs
+    const EXEC_TIMEOUT = 5000; // 5s per exec call
+    const containers = [];
+
+    const execPromises = psList.map(async (c) => {
+        const base = baselineMap.get(c.name) || {
+            cpu_percent: 0,
+            memory_used_bytes: 0,
+            memory_limit_bytes: 0,
+            memory_percent: 0,
+            pids: 0,
+            net_io: '',
+            block_io: '',
+        };
+
+        const entry = {
+            name: c.name,
+            cpu_percent: base.cpu_percent,
+            memory_used_bytes: base.memory_used_bytes,
+            memory_limit_bytes: base.memory_limit_bytes,
+            memory_percent: base.memory_percent,
+            pids: base.pids,
+            net_io: base.net_io,
+            block_io: base.block_io,
+            paused: c.paused,
+        };
+
+        // Exec into running or paused containers to get real memory/PIDs
+        // For paused containers: briefly unpause → exec → re-pause
+        const canExec = (c.running || c.paused) && CONTAINER_NAME_REGEX.test(c.name);
+        if (canExec) {
+            let wasPaused = c.paused;
+            if (wasPaused) {
+                try {
+                    await execFilePromise('nerdctl', ['unpause', c.name], { timeout: EXEC_TIMEOUT });
+                } catch (_) {
+                    return entry; // Can't unpause — skip exec entirely
                 }
             }
-            res.json({ containers });
+
+            // Read /proc/meminfo inside the VM for real memory usage
+            try {
+                const { stdout } = await execFilePromise(
+                    'nerdctl', ['exec', c.name, 'cat', '/proc/meminfo'],
+                    { timeout: EXEC_TIMEOUT }
+                );
+                const parseField = (field) => {
+                    const m = stdout.match(new RegExp(`${field}:\\s+(\\d+)`));
+                    return m ? parseInt(m[1]) * 1024 : 0; // kB → bytes
+                };
+                const memTotal = parseField('MemTotal');
+                const memAvailable = parseField('MemAvailable');
+                if (memTotal > 0) {
+                    entry.memory_used_bytes = memTotal - memAvailable;
+                    entry.memory_limit_bytes = memTotal;
+                    entry.memory_percent = Math.round(((memTotal - memAvailable) / memTotal) * 100);
+                }
+            } catch (_) {
+                // exec failed — keep baseline values
+            }
+
+            // Count PIDs inside the VM
+            try {
+                const { stdout } = await execFilePromise(
+                    'nerdctl', ['exec', c.name, 'sh', '-c', 'ls /proc | grep -E "^[0-9]+$" | wc -l'],
+                    { timeout: EXEC_TIMEOUT }
+                );
+                const pids = parseInt(stdout.trim());
+                if (pids > 0) entry.pids = pids;
+            } catch (_) {
+                // exec failed — keep baseline PIDs
+            }
+
+            // Re-pause if we unpaused for stats
+            if (wasPaused) {
+                try {
+                    await execFilePromise('nerdctl', ['pause', c.name], { timeout: EXEC_TIMEOUT });
+                } catch (_) {} // best-effort re-pause
+            }
         }
-    } catch (err) {
-        res.status(500).json({ error: err.message });
-    }
+
+        return entry;
+    });
+
+    try {
+        const results = await Promise.allSettled(execPromises);
+        for (const r of results) {
+            if (r.status === 'fulfilled') containers.push(r.value);
+        }
+    } catch (_) {}
+
+    res.json({ containers });
 });
 
 // Parse memory usage string like "128MB / 512MB" → bytes
@@ -318,7 +433,6 @@ app.post('/write-file', async (req, res) => {
     const { path: filePath, content_base64, mode } = req.body;
     if (!filePath || !content_base64) return res.status(400).json({ error: 'path and content_base64 required' });
 
-    // Validate path — must be under /opt/nova/ and no path traversal
     if (!isSafePath(filePath)) {
         return res.status(403).json({ error: 'Path must be under /opt/nova/ and must not contain ..' });
     }
@@ -338,12 +452,10 @@ app.post('/write-file', async (req, res) => {
 });
 
 // ── POST /build ─────────────────────────────────────────────────────────────
-// Run nerdctl build + push on the worker. Used by buildService.js.
 app.post('/build', async (req, res) => {
     const { build_dir, tag, no_cache } = req.body;
     if (!build_dir || !tag) return res.status(400).json({ error: 'build_dir and tag required' });
 
-    // Validate paths — must be under /opt/nova/ and no path traversal
     if (!isSafePath(build_dir)) {
         return res.status(403).json({ error: 'build_dir must be under /opt/nova/ and must not contain ..' });
     }
@@ -352,7 +464,7 @@ app.post('/build', async (req, res) => {
         const noCacheFlag = no_cache ? '--no-cache' : '';
         const { stdout, stderr } = await execPromise(
             `cd ${build_dir} && nerdctl build ${noCacheFlag} -t ${tag} . && nerdctl push --insecure-registry ${tag}`,
-            { timeout: 300000 } // 5 min — builds can be slow
+            { timeout: 300000 }
         );
         res.json({ success: true, stdout: stdout.trim(), stderr: stderr.trim() });
     } catch (err) {
@@ -366,7 +478,6 @@ app.post('/build', async (req, res) => {
 });
 
 // ── POST /exec ──────────────────────────────────────────────────────────────
-// Execute a single command on the worker. Used by buildService.js for misc commands.
 app.post('/exec', async (req, res) => {
     const { command, timeout } = req.body;
     if (!command) return res.status(400).json({ error: 'command required' });
@@ -388,9 +499,6 @@ app.post('/exec', async (req, res) => {
 });
 
 // ── POST /launch ────────────────────────────────────────────────────────────
-// Execute a base64-encoded launch script on the worker.
-// Used by the Placement Service to launch containers without SSH.
-// Eliminates ~1s SSH handshake overhead on cold starts.
 app.post('/launch', async (req, res) => {
     const { script_base64 } = req.body;
     if (!script_base64) return res.status(400).json({ error: 'script_base64 required' });
@@ -398,7 +506,7 @@ app.post('/launch', async (req, res) => {
     try {
         const { stdout, stderr } = await execPromise(
             `echo '${script_base64}' | base64 -d | bash`,
-            { timeout: 90000 } // 90s — Kata VM boot can take 5-15s
+            { timeout: 90000 }
         );
         res.json({ success: true, stdout: stdout.trim(), stderr: stderr.trim() });
     } catch (err) {
@@ -425,13 +533,11 @@ const shutdown = (signal) => {
     isShuttingDown = true;
     console.log(`\n${signal} received — shutting down gracefully...`);
 
-    // Stop accepting new connections
     server.close(() => {
         console.log('All connections closed. Exiting.');
         process.exit(0);
     });
 
-    // Force exit after 10s if connections don't drain
     setTimeout(() => {
         console.log('Forcing exit — connections did not drain in 10s');
         process.exit(1);

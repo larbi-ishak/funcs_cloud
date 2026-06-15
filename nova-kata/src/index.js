@@ -1,7 +1,6 @@
 require('dotenv').config();
 
 const express = require('express');
-const path = require('path');
 const { initDb } = require('./db/database');
 const { startMonitoring } = require('./services/monitoringService');
 const workersRouter = require('./routes/workers');
@@ -29,9 +28,6 @@ app.use((req, res, next) => {
     logger.debug(`${req.method} ${req.path}`);
     next();
 });
-
-// ── Static frontend ───────────────────────────────────────────────────────────
-app.use(express.static(path.join(__dirname, 'public')));
 
 // ── Routes ────────────────────────────────────────────────────────────────────
 app.use('/', deployRouter);       // /functions/deploy (SSE build + warm)

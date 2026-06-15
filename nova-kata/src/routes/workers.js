@@ -224,29 +224,17 @@ router.get('/workers/:id/containers', async (req, res) => {
 
     // Try to get live status + container stats from Worker API
     let liveContainers = [];
-    let containerStatsList = [];
     try {
-        const [psRes, statsRes] = await Promise.allSettled([
-            workerApiClient.get(`http://${worker.ip}:${WORKER_API_PORT}/ps`),
-            workerApiClient.get(`http://${worker.ip}:${WORKER_API_PORT}/container-stats`),
-        ]);
-        if (psRes.status === 'fulfilled') liveContainers = psRes.value.data.containers || [];
-        if (statsRes.status === 'fulfilled') containerStatsList = statsRes.value.data.containers || [];
+        const psRes = await workerApiClient.get(`http://${worker.ip}:${WORKER_API_PORT}/ps`).catch(() => null);
+        if (psRes) liveContainers = psRes.data.containers || [];
     } catch (_) {
         // Worker API unavailable — return DB data only
     }
 
     // Merge live status + stats into DB records
     const liveMap = new Map(liveContainers.map(c => [c.name, c.status]));
-    const statsMap = new Map(containerStatsList.map(c => [c.name, c]));
     for (const c of enriched) {
         c.live_status = liveMap.get(c.container_name) || 'not_found';
-        const cs = statsMap.get(c.container_name);
-        c.cpu_percent = cs?.cpu_percent || 0;
-        c.memory_used_bytes = cs?.memory_used_bytes || 0;
-        c.memory_limit_bytes = cs?.memory_limit_bytes || 0;
-        c.memory_percent = cs?.memory_percent || 0;
-        c.pids = cs?.pids || 0;
     }
 
     return res.json({

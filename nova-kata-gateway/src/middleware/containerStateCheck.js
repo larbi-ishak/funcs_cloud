@@ -210,9 +210,24 @@ export default async function containerStateCheck(req, res, next) {
                 functionName, placement_call_ms: placementElapsed, error: error.message,
             }, 'containerStateCheck_claim_failed');
             logger.error({ functionName }, `Failed to claim container: ${error.message}`);
+
+            // Self-heal: if placement returned 404 or 500, the function_id in our
+            // cache may be stale (e.g., function was deleted and re-deployed with
+            // a new ID). Invalidate both function and container cache so the next
+            // request fetches fresh metadata from the DB.
+            const isStaleCacheError = error.response && (error.response.status === 404 || error.response.status >= 500);
+            if (isStaleCacheError) {
+                req.log.info({ functionName }, 'containerStateCheck_self_heal_invalidating_cache');
+                try {
+                    await cache.del(`fn:${functionName}`);
+                    await cache.del(`ct:${functionName}`);
+                } catch (_) {}
+            }
+
             return res.status(503).setHeader('Retry-After', '2').json({
                 error: "function temporarily unavailable",
                 request_id: req.requestId,
+                ...(isStaleCacheError ? { hint: "Cache invalidated — retry will fetch fresh metadata" } : {}),
             });
         }
     } catch (err) {

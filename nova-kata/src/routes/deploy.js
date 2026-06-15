@@ -185,10 +185,10 @@ router.post('/functions/deploy', upload.array('files'), async (req, res) => {
                 warmPool.removeByFunctionId(func.id);
             }
 
-            // Invalidate gateway cache so it picks up the new image
+            // Invalidate gateway cache so it picks up the new image + new function ID
             try {
                 const { invalidateGatewayCache } = require('../services/monitoringService');
-                invalidateGatewayCache();
+                invalidateGatewayCache(functionName);
             } catch (_) {}
         }
 
@@ -208,6 +208,7 @@ router.post('/functions/deploy', upload.array('files'), async (req, res) => {
                     cpu_limit: cpu_limit ? parseFloat(cpu_limit) : undefined,
                     storage_limit: storage_limit ? parseInt(storage_limit) : undefined,
                     function_id: func.id,
+                    function_name: functionName,
                     pause_after: true,
                 });
 
@@ -319,6 +320,13 @@ router.delete('/functions/:id', async (req, res) => {
 
         // Purge the function record
         functions.deleteById(func.id);
+
+        // Invalidate gateway cache so it stops routing to this function
+        // and forgets the old function ID (prevents stale cache on re-deploy)
+        try {
+            const { invalidateGatewayCache } = require('../services/monitoringService');
+            await invalidateGatewayCache(func.name);
+        } catch (_) {}
 
         log('✅ Function deleted successfully');
         res.json({ success: true, message: `Function '${func.name}' and all its resources have been deleted.` });

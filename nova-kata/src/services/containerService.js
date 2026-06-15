@@ -96,7 +96,15 @@ async function _launchContainer(workerId, options = {}) {
     const agentPort = options.agent_port || DEFAULT_AGENT_PORT;
     const envVars = options.env_vars || {};
     const functionId = options.function_id || null;
+    const functionName = options.function_name || null;
     const pauseAfter = options.pause_after || false;
+
+    // ── Per-function network isolation ────────────────────────────────────────
+    // Each function gets its own CNI bridge network. Containers of the same
+    // function can communicate (same tenant), but different functions are
+    // fully isolated from each other at L2/L3.
+    // If no function_name is provided, fall back to the default bridge (legacy).
+    const networkName = functionName ? `nova-net-${functionName}` : null;
 
     // Allocate a host port from the pool
     const poolIndex = allocatePoolIndex(workerId);
@@ -151,8 +159,20 @@ async function _launchContainer(workerId, options = {}) {
     const memoryLimit = options.memory_limit ? `--memory ${options.memory_limit}m` : '';
     const cpuLimit = options.cpu_limit ? `--cpus ${options.cpu_limit}` : '';
 
+    const networkFlag = networkName ? `--network ${networkName}` : '';
+    const networkCreate = networkName
+        ? `# ── 0a. Ensure per-function network exists (idempotent) ──────────────────────\n# Each function gets its own CNI bridge — containers of different functions\n# are isolated at L2/L3. Containers of the same function share the network.\nnerdctl network create ${networkName} 2>/dev/null || true`
+        : '# No per-function network (using default bridge)';
+
     const launchScript = `#!/usr/bin/env bash
 set -euo pipefail
+
+# ── 0. Remove any stale container with the same name (idempotent launch) ──────
+# If a previous launch left a container with this name, remove it first.
+# This prevents "name already used" errors on re-deploy.
+nerdctl rm -f ${containerName} 2>/dev/null || true
+
+${networkCreate}
 
 # ── 1. Run container with Kata QEMU runtime + port mapping ────────────────────
 # -p ${hostPort}:${agentPort} maps worker host port → container agent port
@@ -163,6 +183,7 @@ nerdctl run \\
   --insecure-registry \\
   --runtime ${runtime} \\
   --snapshotter ${DEFAULT_SNAPSHOTTER} \\
+  ${networkFlag} \\
   -p ${hostPort}:${agentPort} \\
   ${memoryLimit} \\
   ${cpuLimit} \\
