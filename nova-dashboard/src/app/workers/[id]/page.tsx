@@ -1,11 +1,14 @@
 "use client";
 
-import { useEffect, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
+import useSWR from "swr";
 import {
   ArrowLeft, Server, CheckCircle2, AlertCircle, Cpu, HardDrive,
   MemoryStick, Container, Activity, RefreshCw,
 } from "lucide-react";
+import { fetcher } from "../../../lib/fetcher";
+import { StatusBadge } from "../../../components/StatusBadge";
+import type { Worker, Container as NovaContainer, WorkerDetailResponse } from "../../../types/api";
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:3002";
 
@@ -45,51 +48,29 @@ export default function WorkerDetailPage() {
   const router = useRouter();
   const workerId = params.id as string;
 
-  const [worker, setWorker] = useState<any>(null);
-  const [containers, setContainers] = useState<any[]>([]);
-  const [containerStats, setContainerStats] = useState<Record<string, any>>({});
-  const [stats, setStats] = useState<any>(null);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
+  const { data: workerData, error: workerError, isLoading: workerLoading } = useSWR<WorkerDetailResponse>(
+    `${API_URL}/workers/${workerId}`,
+    fetcher,
+    { refreshInterval: 5000 }
+  );
 
-  const fetchData = async () => {
-    try {
-      const [workerRes, containersRes, statsRes] = await Promise.allSettled([
-        fetch(`${API_URL}/workers/${workerId}`).then((r) => r.json()),
-        fetch(`${API_URL}/workers/${workerId}/containers`).then((r) => r.json()),
-        fetch(`${API_URL}/workers/${workerId}/stats`).then((r) => r.json()),
-      ]);
+  const { data: containersData } = useSWR<{ containers: any[] }>(
+    `${API_URL}/workers/${workerId}/containers`,
+    fetcher,
+    { refreshInterval: 5000 }
+  );
 
-      if (workerRes.status === "fulfilled") setWorker(workerRes.value.worker);
-      if (containersRes.status === "fulfilled") {
-        const cData = containersRes.value;
-        setContainers(cData.containers || []);
-        // Also fetch per-container stats if we have the worker IP
-        if (cData.worker_ip) {
-          try {
-            const statsRes2 = await fetch(`${API_URL}/workers/${workerId}/stats`);
-            const statsData = await statsRes2.json();
-            // The /stats endpoint doesn't have per-container stats, we need /container-stats from worker
-            // For now we'll use the container-stats from the placement service
-          } catch (_) {}
-        }
-      }
-      if (statsRes.status === "fulfilled") setStats(statsRes.value);
-      setError(null);
-    } catch (e: any) {
-      setError(e.message);
-    } finally {
-      setLoading(false);
-    }
-  };
+  const { data: stats } = useSWR<Record<string, any>>(
+    `${API_URL}/workers/${workerId}/stats`,
+    fetcher,
+    { refreshInterval: 5000 }
+  );
 
-  useEffect(() => {
-    fetchData();
-    const t = setInterval(fetchData, 5000);
-    return () => clearInterval(t);
-  }, [workerId]);
+  const worker = workerData?.worker ?? null;
+  const containers = containersData?.containers ?? [];
+  const error = workerError?.message ?? null;
 
-  if (loading) {
+  if (workerLoading) {
     return (
       <div className="min-h-screen bg-background text-foreground p-8 flex items-center justify-center">
         <RefreshCw className="w-6 h-6 animate-spin text-muted-foreground" />
@@ -128,9 +109,9 @@ export default function WorkerDetailPage() {
             <span className={`text-sm ${statusColor[worker.status] || "text-muted-foreground"}`}>
               {worker.status}
             </span>
-            {worker.last_seen_at && (
+            {(worker as any).last_seen_at && (
               <span className="text-muted-foreground text-sm ml-2">
-                Last seen: {timeAgo(worker.last_seen_at)}
+                Last seen: {timeAgo((worker as any).last_seen_at)}
               </span>
             )}
           </div>
@@ -261,10 +242,7 @@ export default function WorkerDetailPage() {
                   <tr key={c.id} className="border-b border-border/50 hover:bg-accent/20">
                     <td className="px-5 py-3 font-mono text-xs">{c.container_name}</td>
                     <td className="px-5 py-3">
-                      <span className={`inline-flex items-center gap-1 ${statusColor[c.status] || "text-muted-foreground"}`}>
-                        <Activity className="w-3 h-3" />
-                        {c.status}
-                      </span>
+                      <StatusBadge status={c.status} />
                     </td>
                     <td className="px-5 py-3">
                       {c.live_status === "not_found" ? (

@@ -1,8 +1,10 @@
 "use client";
 
-import { useEffect, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
+import useSWR from "swr";
 import { ArrowLeft, RefreshCw, Terminal, Activity, Layers, Database, Cpu, Copy, Clock, CheckCircle2, AlertCircle, MemoryStick } from "lucide-react";
+import { fetcher } from "../../../lib/fetcher";
+import { StatusBadge } from "../../../components/StatusBadge";
 import Link from "next/link";
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:3002";
@@ -17,37 +19,24 @@ function formatBytes(bytes: number): string {
 export default function FunctionDetailsPage() {
   const { id } = useParams();
   const router = useRouter();
-  const [func, setFunc] = useState<any>(null);
-  const [liveStats, setLiveStats] = useState<any>(null);
-  const [loading, setLoading] = useState(true);
 
-  const fetchDetails = async () => {
-    try {
-      const [funcRes, statsRes] = await Promise.allSettled([
-        fetch(`${API_URL}/functions/${id}`).then((r) => r.json()),
-        fetch(`${API_URL}/functions/${id}/stats`).then((r) => r.json()),
-      ]);
+  const { data: func, isLoading: funcLoading } = useSWR<Record<string, any>>(
+    `${API_URL}/functions/${id}`,
+    fetcher,
+    { refreshInterval: 5000 }
+  );
 
-      if (funcRes.status === "fulfilled") setFunc(funcRes.value);
-      if (statsRes.status === "fulfilled") setLiveStats(statsRes.value);
-    } catch (e) {
-      console.error(e);
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  useEffect(() => {
-    fetchDetails();
-    const t = setInterval(fetchDetails, 5000);
-    return () => clearInterval(t);
-  }, [id]);
+  const { data: liveStats } = useSWR<Record<string, any>>(
+    `${API_URL}/functions/${id}/stats`,
+    fetcher,
+    { refreshInterval: 5000 }
+  );
 
   const copyToClipboard = (text: string) => {
     navigator.clipboard.writeText(text);
   };
 
-  if (loading && !func) {
+  if (funcLoading && !func) {
     return (
       <div className="h-64 flex items-center justify-center">
         <RefreshCw className="animate-spin text-muted-foreground" />
@@ -204,11 +193,7 @@ export default function FunctionDetailsPage() {
                   <tr key={c.container_id} className="hover:bg-accent/10 transition-colors">
                     <td className="px-6 py-3 font-mono text-xs">{c.container_name}</td>
                     <td className="px-6 py-3">
-                      <span className={`px-2 py-0.5 rounded text-xs font-medium ${
-                        c.status === 'running' ? 'bg-green-500/10 text-green-500' :
-                        c.status === 'paused' ? 'bg-yellow-500/10 text-yellow-500' :
-                        'bg-gray-500/10 text-gray-500'
-                      }`}>{c.status}</span>
+                      <StatusBadge status={c.status} />
                     </td>
                     <td className="px-6 py-3 font-mono text-xs text-blue-500">{c.cpu_percent.toFixed(1)}%</td>
                     <td className="px-6 py-3 font-mono text-xs text-green-500">

@@ -4,6 +4,7 @@ import "./globals.css";
 import Link from "next/link";
 import { LayoutDashboard, Rocket, Server, Activity } from "lucide-react";
 import ThemeToggle from "../components/ThemeToggle";
+import { Toaster } from "sonner";
 
 const inter = Inter({ subsets: ["latin"] });
 
@@ -67,6 +68,7 @@ export default function RootLayout({
               {children}
             </div>
           </div>
+          <Toaster richColors position="top-right" />
         </main>
       </body>
     </html>

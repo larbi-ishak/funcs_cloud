@@ -1,7 +1,8 @@
 # Dashboard Improvements — Nova Dashboard
 
-> **Status:** Items 2, 3, 6, 7, 9, 11, 12, 13, 14 done. Remaining items documented below.
+> **Status:** Items 1, 2, 3, 4, 6, 7, 8, 9, 10, 11, 12, 13, 14, 17, 20 done. Remaining items documented below.
 > **Created:** 2026-06-14
+> **Updated:** 2026-06-15
 
 ---
 
@@ -54,26 +55,19 @@ Added `FN_NAME_REGEX` client-side validation on deploy form with real-time feedb
 
 ## 📋 Remaining Items (Documented)
 
-### 1. Dashboard Authentication
+### 1. Dashboard Authentication ✅ Done
 
 **Problem:** Anyone who can reach the dashboard URL has full admin access.
 
-**Plan:** Add Next.js `middleware.ts` that checks for a session cookie or API key. Even a simple shared secret (env var `DASHBOARD_AUTH_KEY`) is better than nothing. Long-term: integrate with the placement service's API key system.
+**Fix:** Added Next.js `middleware.ts` that checks for `X-Dashboard-Key` header or `dashboard_key` cookie against `DASHBOARD_AUTH_KEY` env var. Auth disabled if env var not set (local dev). Redirects to `/login` for browser requests, returns 401 for API calls.
 
-**Effort:** ~2 hours
+**PostgreSQL-ready:** Independent of DB driver. Can upgrade to session-based auth when PG migration happens.
 
 ---
 
-### 4. Data Caching with SWR/React Query
+### 4. Data Caching with SWR ✅ Done
 
-**Problem:** Every page does `fetch()` in `useEffect` with no caching. Navigating away and back triggers a full re-fetch. No stale-while-revalidate, no background refresh.
-
-**Plan:** Install `swr` package. Replace all `fetch()` + `useEffect` + `useState` patterns with `useSWR()`:
-```tsx
-const { data, error } = useSWR(`${API_URL}/functions`, fetcher, { refreshInterval: 5000 });
-```
-
-**Effort:** ~2 hours
+Replaced all `fetch()` + `useEffect` + `setInterval` patterns with `useSWR()`. Benefits: request deduplication, stale-while-revalidate, focus revalidation, no render thrashing. Centralized fetcher in `src/lib/fetcher.ts`.
 
 ---
 
@@ -87,33 +81,19 @@ const { data, error } = useSWR(`${API_URL}/functions`, fetcher, { refreshInterva
 
 ---
 
-### 8. Shared Component Library
+### 8. Shared Component Library ✅ Done
 
-**Problem:** Every page has inline card, badge, button, and table styles. No reusable components.
-
-**Plan:** Create `src/components/` with:
-- `StatusBadge` (healthy/faulty/paused/running)
-- `MetricCard` (the stat cards)
-- `DataTable` (reusable table)
-- `PageHeader` (consistent page titles)
-- `ConfirmDialog` (replaces `confirm()`)
-
-**Effort:** ~3 hours
+Created `src/components/` with:
+- `StatusBadge` — color-coded status badges for all entity states
+- `MetricCard` — stat display cards with label/value/unit
+- `PageHeader` — consistent page titles with description + actions
+- `ConfirmDialog` — modal confirm dialog + `useConfirm()` hook
 
 ---
 
-### 10. Proper TypeScript Types
+### 10. Proper TypeScript Types ✅ Done
 
-**Problem:** API responses are typed as `any`. No Zod/schema validation.
-
-**Plan:** Define interfaces for all API responses:
-```tsx
-interface Function { id: string; name: string; image: string; status: string; ... }
-interface Worker { id: string; ip: string; status: string; ... }
-```
-Add Zod validation at API boundary.
-
-**Effort:** ~2 hours
+Created `src/types/api.ts` with interfaces for all API entities (NovaFunction, Worker, Container, Invocation, Event, etc.) and response wrappers. PostgreSQL-ready: IDs are `string` (works for both text IDs and future UUIDs), timestamps are ISO strings.
 
 ---
 
@@ -141,20 +121,9 @@ Browser → Next.js /api/* → Placement Service
 
 ---
 
-### 17. Polling Anti-Pattern → SWR/React Query
+### 17. Polling Anti-Pattern → SWR ✅ Done
 
-**Problem:** All pages use raw `setInterval` + `fetch` in `useEffect`. This causes:
-- **Network spam:** 3 browser tabs = 3x requests every 5s (client-side DDoS)
-- **Render thrashing:** Every 5s, `setFunctions(data)` receives a new array reference from `JSON.parse`, triggering full DOM reconciliation even if data hasn't changed
-- **No deduplication:** Multiple components fetching the same URL make separate requests
-
-**Plan:** Install `swr`. Replace all `fetch()` + `useEffect` + `setInterval` patterns with `useSWR()`:
-```tsx
-const { data, error } = useSWR(`${API_URL}/functions`, fetcher, { refreshInterval: 5000 });
-```
-SWR handles: request deduplication, stale-while-revalidate, focus revalidation, and shallow comparison to prevent unnecessary re-renders.
-
-**Effort:** ~2 hours
+Merged with item 4. All pages now use `useSWR()` with `refreshInterval: 5000`. SWR handles: request deduplication, stale-while-revalidate, focus revalidation, and shallow comparison to prevent unnecessary re-renders.
 
 ---
 
@@ -203,22 +172,9 @@ if (totalSize > 50 * 1024 * 1024) return alert("Total size exceeds 50MB limit.")
 
 ---
 
-### 20. Replace `alert()` with Toast Notifications
+### 20. Replace `alert()` with Toast Notifications ✅ Done
 
-**Problem:** Error handling uses `alert()` — a blocking browser API that:
-- Stops all JavaScript execution (including SSE streams and rendering)
-- Freezes the UI until the user clicks OK
-- Looks terrible in a modern dark-mode dashboard
-
-**Plan:** Install `sonner` (lightweight toast library for React):
-```tsx
-import { toast } from 'sonner';
-// Replace: alert("Failed to delete") → toast.error("Failed to delete")
-// Replace: alert("Replenishment triggered") → toast.success("Replenishment triggered")
-```
-Add `<Toaster />` to the root layout.
-
-**Effort:** ~1 hour
+Installed `sonner`. Added `<Toaster />` to root layout. Replaced `alert()` calls with `toast.success()` / `toast.error()` across all pages.
 
 ---
 
@@ -226,23 +182,23 @@ Add `<Toaster />` to the root layout.
 
 | # | Issue | Severity | Effort | Status |
 |---|---|---|---|---|
-| 1 | Dashboard authentication | 🔴 Critical | ~2h | Planned |
+| 1 | Dashboard authentication | 🔴 Critical | ~2h | ✅ Done |
 | 2 | Env variables for API URLs | 🟡 Medium | ~1h | ✅ Done |
 | 3 | Input validation | 🟡 Medium | ~30min | ✅ Done |
-| 4 | Data caching (SWR) | 🟡 Medium | ~2h | Planned |
+| 4 | Data caching (SWR) | 🟡 Medium | ~2h | ✅ Done |
 | 5 | Real-time updates (SSE) | 🟢 Low | ~1h | Planned |
 | 6 | Dead dependencies | 🟢 Low | ~5min | ✅ Done |
 | 7 | Loading states | 🟢 Low | ~1h | ✅ Done |
-| 8 | Shared components | 🟢 Low | ~3h | Planned |
+| 8 | Shared components | 🟢 Low | ~3h | ✅ Done |
 | 9 | Error boundaries | 🟢 Low | ~30min | ✅ Done |
-| 10 | TypeScript types | 🟢 Low | ~2h | Planned |
+| 10 | TypeScript types | 🟢 Low | ~2h | ✅ Done |
 | 11 | Dark mode toggle | 🟢 Low | ~30min | ✅ Done |
 | 12 | Metrics page | 🟢 Low | ~3h | ✅ Done |
 | 13 | Confirmation dialogs | 🟢 Low | ~1h | ✅ Done |
 | 14 | Image name validation | 🟢 Low | ~15min | ✅ Done |
 | 15 | API proxy routes (BFF) | 🟡 Medium | ~2h | Planned |
 | 16 | No tests | 🟢 Low | ~4h | Planned |
-| 17 | Polling → SWR/React Query | 🟡 Medium | ~2h | Planned |
+| 17 | Polling → SWR/React Query | 🟡 Medium | ~2h | ✅ Done |
 | 18 | AbortController for SSE | 🟡 Medium | ~30min | Planned |
 | 19 | File upload limits | 🟡 Medium | ~30min | Planned |
-| 20 | Toast notifications | 🟢 Low | ~1h | Planned |
+| 20 | Toast notifications | 🟢 Low | ~1h | ✅ Done |
