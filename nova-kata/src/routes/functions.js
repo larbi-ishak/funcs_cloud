@@ -20,7 +20,7 @@ const workerApiClient = axios.create({
  * Register a new function.
  * Body: { name, image, region, agent_cmd?, agent_port?, env_vars?, auth_policy? }
  */
-router.post('/functions', (req, res) => {
+router.post('/functions', async (req, res) => {
     const { name, image, region } = req.body;
 
     if (!name || !image || !region) {
@@ -38,13 +38,13 @@ router.post('/functions', (req, res) => {
     }
 
     // Check for duplicate
-    const existing = functions.findByNameAndRegion(name, region);
+    const existing = await functions.findByNameAndRegion(name, region);
     if (existing) {
         return res.status(409).json({ error: `Function '${name}' already exists in region '${region}'` });
     }
 
     const id = uuidv4();
-    functions.insert({
+    await functions.insert({
         id,
         name,
         image,
@@ -57,23 +57,23 @@ router.post('/functions', (req, res) => {
     });
 
     logger.info(`Function '${name}' registered as ${id}`);
-    return res.status(201).json({ success: true, function: functions.findById(id) });
+    return res.status(201).json({ success: true, function: await functions.findById(id) });
 });
 
 // ─── GET /functions ───────────────────────────────────────────────────────────
-router.get('/functions', (req, res) => {
-    const all = functions.findAll();
+router.get('/functions', async (req, res) => {
+    const all = await functions.findAll();
     return res.json({ functions: all, total: all.length });
 });
 
 // ─── GET /functions/:id ───────────────────────────────────────────────────────
-router.get('/functions/:id', (req, res) => {
-    const func = functions.findById(req.params.id);
+router.get('/functions/:id', async (req, res) => {
+    const func = await functions.findById(req.params.id);
     if (!func) return res.status(404).json({ error: 'Function not found' });
 
-    const keys = apiKeys.findByFunction(req.params.id);
+    const keys = await apiKeys.findByFunction(req.params.id);
     const { invocations } = require('../db/database');
-    const invs = invocations.findByFunction(req.params.id);
+    const invs = await invocations.findByFunction(req.params.id);
     return res.json({ function: func, api_keys: keys, invocations: invs });
 });
 
@@ -82,11 +82,11 @@ router.get('/functions/:id', (req, res) => {
  * Get per-container CPU/RAM usage for a function by calling Worker API /container-stats.
  */
 router.get('/functions/:id/stats', async (req, res) => {
-    const func = functions.findById(req.params.id);
+    const func = await functions.findById(req.params.id);
     if (!func) return res.status(404).json({ error: 'Function not found' });
 
     // Find all containers for this function
-    const fnContainers = containers.findAll().filter(
+    const fnContainers = (await containers.findAll()).filter(
         c => c.function_id === req.params.id && c.status !== 'stopped' && c.status !== 'failed'
     );
 
@@ -109,7 +109,7 @@ router.get('/functions/:id/stats', async (req, res) => {
     // Fetch container stats from each worker
     const containerStats = [];
     for (const [workerId, workerContainers] of byWorker) {
-        const worker = workers.findById(workerId);
+        const worker = await workers.findById(workerId);
         if (!worker) continue;
 
         try {
@@ -157,11 +157,11 @@ router.get('/functions/:id/stats', async (req, res) => {
 });
 
 // ─── DELETE /functions/:id ────────────────────────────────────────────────────
-router.delete('/functions/:id', (req, res) => {
-    const func = functions.findById(req.params.id);
+router.delete('/functions/:id', async (req, res) => {
+    const func = await functions.findById(req.params.id);
     if (!func) return res.status(404).json({ error: 'Function not found' });
 
-    functions.delete(req.params.id);
+    await functions.delete(req.params.id);
     logger.info(`Function ${req.params.id} deleted`);
     return res.json({ success: true });
 });
@@ -170,14 +170,14 @@ router.delete('/functions/:id', (req, res) => {
 /**
  * Generate an API key for a function.
  */
-router.post('/functions/:id/keys', (req, res) => {
-    const func = functions.findById(req.params.id);
+router.post('/functions/:id/keys', async (req, res) => {
+    const func = await functions.findById(req.params.id);
     if (!func) return res.status(404).json({ error: 'Function not found' });
 
     const id = uuidv4();
     const key = `nk_${uuidv4().replace(/-/g, '')}`;
 
-    apiKeys.insert({
+    await apiKeys.insert({
         id,
         key,
         function_id: req.params.id,
@@ -189,12 +189,12 @@ router.post('/functions/:id/keys', (req, res) => {
 });
 
 // ─── POST /invocations ────────────────────────────────────────────────────────
-router.post('/invocations', (req, res) => {
+router.post('/invocations', async (req, res) => {
     const { function_id, container_id, status_code, latency_ms, request_method, request_path } = req.body;
     if (!function_id) return res.status(400).json({ error: 'function_id is required' });
 
     const { invocations } = require('../db/database');
-    invocations.insert({
+    await invocations.insert({
         id: uuidv4(),
         function_id,
         container_id: container_id || null,
@@ -212,33 +212,17 @@ router.post('/invocations', (req, res) => {
  * Bulk-insert invocations from the gateway's batch buffer.
  * Uses a SQLite transaction for fast bulk insert (~10-100× faster than individual inserts).
  */
-router.post('/invocations/batch', (req, res) => {
+router.post('/invocations/batch', async (req, res) => {
     const batch = req.body.invocations;
     if (!batch || !batch.length) return res.status(400).json({ error: 'empty batch' });
 
-    const { getDb } = require('../db/database');
-    const db = getDb();
+    const items = batch.map(item => ({
+        ...item,
+        id: uuidv4(),
+    }));
 
-    const insert = db.prepare(`
-        INSERT INTO invocations (id, function_id, container_id, status_code, latency_ms, request_method, request_path)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
-    `);
-
-    const insertMany = db.transaction((items) => {
-        for (const item of items) {
-            insert.run(
-                uuidv4(),
-                item.function_id,
-                item.container_id || null,
-                item.status_code || 200,
-                item.latency_ms || 0,
-                item.request_method || 'GET',
-                item.request_path || '/'
-            );
-        }
-    });
-
-    insertMany(batch);
+    const { invocations } = require('../db/database');
+    await invocations.insertBatch(items);
     return res.status(201).json({ success: true, inserted: batch.length });
 });
 

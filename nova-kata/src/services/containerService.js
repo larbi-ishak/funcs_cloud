@@ -78,7 +78,7 @@ async function launchContainer(workerId, options = {}) {
 
 async function _launchContainer(workerId, options = {}) {
     const t_launch = performance.now();
-    const worker = workers.findById(workerId);
+    const worker = await workers.findById(workerId);
     if (!worker) throw new Error(`Worker ${workerId} not found`);
     if (worker.status !== 'healthy') {
         throw new Error(`Worker ${workerId} is not healthy (status: ${worker.status})`);
@@ -107,7 +107,7 @@ async function _launchContainer(workerId, options = {}) {
     const networkName = functionName ? `nova-net-${functionName}` : null;
 
     // Allocate a host port from the pool
-    const poolIndex = allocatePoolIndex(workerId);
+    const poolIndex = await allocatePoolIndex(workerId);
     const hostPort = 9000 + poolIndex;
 
     const metadata = {
@@ -119,7 +119,7 @@ async function _launchContainer(workerId, options = {}) {
     logger.info(`${logPrefix}: Launching container (image=${image}, port=${hostPort})...`);
     logTiming(rid, 'launch_start', 0, { workerId, containerName, image, hostPort });
 
-    containers.insert({
+    await containers.insert({
         id: containerId,
         worker_id: workerId,
         container_name: containerName,
@@ -258,7 +258,7 @@ printf '{"container_ip":"%s","host_port":${hostPort},"status":"ok"}\\n' "$CONTAI
                 }
 
                 const status = pauseAfter ? 'paused' : 'running';
-                containers.updateStatus(containerId, status, {
+                await containers.updateStatus(containerId, status, {
                     container_ip: containerIp,
                     host_port: hostPort,
                 });
@@ -267,7 +267,7 @@ printf '{"container_ip":"%s","host_port":${hostPort},"status":"ok"}\\n' "$CONTAI
                 logTiming(rid, 'launch_complete', totalMs, { containerId, containerIp, total_ms: totalMs, via: 'worker_api' });
                 logger.info(`${logPrefix}: Container started via Worker API (IP ${containerIp}) — ${totalMs}ms`);
 
-                return containers.findById(containerId);
+                return await containers.findById(containerId);
             }
             throw new Error('Worker API launch returned non-success');
         } catch (apiErr) {
@@ -309,7 +309,7 @@ printf '{"container_ip":"%s","host_port":${hostPort},"status":"ok"}\\n' "$CONTAI
             }
 
             const status = pauseAfter ? 'paused' : 'running';
-            containers.updateStatus(containerId, status, {
+            await containers.updateStatus(containerId, status, {
                 container_ip: containerIp,
                 host_port: hostPort,
             });
@@ -318,14 +318,14 @@ printf '{"container_ip":"%s","host_port":${hostPort},"status":"ok"}\\n' "$CONTAI
             logTiming(rid, 'launch_complete', totalMs, { containerId, containerIp, total_ms: totalMs, via: 'ssh' });
             logger.info(`${logPrefix}: Container started via SSH (IP ${containerIp}) — ${totalMs}ms`);
 
-            return containers.findById(containerId);
+            return await containers.findById(containerId);
         } finally {
             if (ssh) ssh.close();
         }
     } catch (err) {
         const totalMs = +(performance.now() - t_launch).toFixed(2);
         logTiming(rid, 'launch_failed', totalMs, { error: err.message, total_ms: totalMs, via: launchVia });
-        containers.updateStatus(containerId, 'failed');
+        await containers.updateStatus(containerId, 'failed');
         logger.error(`${logPrefix}: Launch failed — ${err.message}`);
         throw err;
     }
@@ -336,13 +336,13 @@ printf '{"container_ip":"%s","host_port":${hostPort},"status":"ok"}\\n' "$CONTAI
  * Near-instant resume — this is the "all warm" strategy.
  */
 async function unpauseContainer(containerId) {
-    const container = containers.findById(containerId);
+    const container = await containers.findById(containerId);
     if (!container) throw new Error(`Container ${containerId} not found`);
     if (container.status !== 'paused') {
         throw new Error(`Container ${containerId} is not paused (status: ${container.status})`);
     }
 
-    const worker = workers.findById(container.worker_id);
+    const worker = await workers.findById(container.worker_id);
     if (!worker) throw new Error(`Worker for container ${containerId} not found`);
 
     const t0 = performance.now();
@@ -360,11 +360,11 @@ async function unpauseContainer(containerId) {
         );
 
         if (response.data && response.data.success) {
-            containers.updateStatus(containerId, 'running');
+            await containers.updateStatus(containerId, 'running');
             const totalMs = +(performance.now() - t0).toFixed(2);
             logTiming(rid, 'unpause_complete', totalMs, { total_ms: totalMs, via: 'worker_api' });
             logger.info(`${logPrefix}: Unpaused via Worker API — ${totalMs}ms`);
-            return containers.findById(containerId);
+            return await containers.findById(containerId);
         }
         throw new Error('Worker API returned non-success');
     } catch (apiErr) {
@@ -384,13 +384,13 @@ async function unpauseContainer(containerId) {
             throw new Error(`Unpause failed: ${result.stderr || result.stdout}`);
         }
 
-        containers.updateStatus(containerId, 'running');
+        await containers.updateStatus(containerId, 'running');
 
         const totalMs = +(performance.now() - t0).toFixed(2);
         logTiming(rid, 'unpause_complete', totalMs, { total_ms: totalMs, via: 'ssh' });
         logger.info(`${logPrefix}: Unpaused via SSH — ${totalMs}ms`);
 
-        return containers.findById(containerId);
+        return await containers.findById(containerId);
 
     } catch (err) {
         logger.error(`${logPrefix}: Unpause failed — ${err.message}`);
@@ -404,13 +404,13 @@ async function unpauseContainer(containerId) {
  * Pause a running container (move to warm pool).
  */
 async function pauseContainer(containerId) {
-    const container = containers.findById(containerId);
+    const container = await containers.findById(containerId);
     if (!container) throw new Error(`Container ${containerId} not found`);
     if (container.status !== 'running') {
         throw new Error(`Container ${containerId} is not running (status: ${container.status})`);
     }
 
-    const worker = workers.findById(container.worker_id);
+    const worker = await workers.findById(container.worker_id);
     if (!worker) throw new Error(`Worker for container ${containerId} not found`);
 
     const logPrefix = `Container[${containerId.slice(0, 8)}]`;
@@ -424,7 +424,7 @@ async function pauseContainer(containerId) {
         );
 
         if (response.data && response.data.success) {
-            containers.updateStatus(containerId, 'paused');
+            await containers.updateStatus(containerId, 'paused');
             logger.info(`${logPrefix}: Paused via Worker API`);
             return;
         }
@@ -446,7 +446,7 @@ async function pauseContainer(containerId) {
             throw new Error(`Pause failed: ${result.stderr || result.stdout}`);
         }
 
-        containers.updateStatus(containerId, 'paused');
+        await containers.updateStatus(containerId, 'paused');
         logger.info(`${logPrefix}: Paused via SSH`);
 
     } finally {
@@ -458,13 +458,13 @@ async function pauseContainer(containerId) {
  * Stop and remove a container.
  */
 async function stopContainer(containerId) {
-    const container = containers.findById(containerId);
+    const container = await containers.findById(containerId);
     if (!container) throw new Error(`Container ${containerId} not found`);
     if (['stopped', 'failed'].includes(container.status)) {
         throw new Error(`Container ${containerId} is already ${container.status}`);
     }
 
-    const worker = workers.findById(container.worker_id);
+    const worker = await workers.findById(container.worker_id);
     if (!worker) throw new Error(`Worker for container ${containerId} not found`);
 
     const logPrefix = `Container[${containerId.slice(0, 8)}]`;
@@ -491,8 +491,8 @@ echo '{"status":"stopped"}'
         );
 
         if (response.data && response.data.success) {
-            warmPool.deleteByContainer(containerId);
-            containers.updateStatus(containerId, 'stopped');
+            await warmPool.deleteByContainer(containerId);
+            await containers.updateStatus(containerId, 'stopped');
             logger.info(`${logPrefix}: Stopped and removed via Worker API`);
             return;
         }
@@ -517,9 +517,9 @@ echo '{"status":"stopped"}'
         }
 
         // Clean up warm pool entry if any
-        warmPool.deleteByContainer(containerId);
+        await warmPool.deleteByContainer(containerId);
 
-        containers.updateStatus(containerId, 'stopped');
+        await containers.updateStatus(containerId, 'stopped');
         logger.info(`${logPrefix}: Stopped and removed via SSH`);
     } finally {
         if (ssh) ssh.close();
@@ -542,8 +542,8 @@ function resolveImageTag(image) {
     return resolved;
 }
 
-function allocatePoolIndex(workerId) {
-    const activeContainers = containers.findByWorker(workerId);
+async function allocatePoolIndex(workerId) {
+    const activeContainers = await containers.findByWorker(workerId);
     const usedIndices = new Set();
 
     for (const c of activeContainers) {

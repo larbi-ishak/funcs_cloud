@@ -17,10 +17,10 @@ export default async function existenceCheck(req, res, next) {
 
         if (!func) {
             // Try exact match (name + region) first
-            func = functions.findByNameAndRegion(functionName, region);
+            func = await functions.findByNameAndRegion(functionName, region);
             // Fallback: path-based routing doesn't know the region, match by name only
             if (!func) {
-                func = functions.findByName(functionName);
+                func = await functions.findByName(functionName);
             }
             if (!func) {
                 req.log.info({

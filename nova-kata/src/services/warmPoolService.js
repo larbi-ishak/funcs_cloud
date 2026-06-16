@@ -21,7 +21,7 @@ const _replenishing = new Set();
  */
 async function claimWarmContainer(functionId) {
     // ── Try to claim from warm pool ──────────────────────────────────────────
-    const warmEntry = warmPool.claimOne(functionId);
+    const warmEntry = await warmPool.claimOne(functionId);
 
     if (warmEntry) {
         logger.info(`Warm pool: claimed container ${warmEntry.container_id} for function ${functionId || 'generic'}`);
@@ -47,9 +47,9 @@ async function claimWarmContainer(functionId) {
         } catch (err) {
             logger.warn(`Warm pool: container ${warmEntry.container_id} unusable (${err.message}) — discarding and cold starting`);
             // Clean up the stale warm pool entry and container record
-            warmPool.deleteByContainer(warmEntry.container_id);
-            const staleContainer = containers.findById(warmEntry.container_id);
-            if (staleContainer) containers.updateStatus(warmEntry.container_id, 'failed');
+            await warmPool.deleteByContainer(warmEntry.container_id);
+            const staleContainer = await containers.findById(warmEntry.container_id);
+            if (staleContainer) await containers.updateStatus(warmEntry.container_id, 'failed');
             // Fall through to cold start below
         }
     }
@@ -57,8 +57,8 @@ async function claimWarmContainer(functionId) {
     // ── No warm container available -> cold start ────────────────────────────
     logger.info(`Warm pool empty for function ${functionId || 'generic'} — cold starting`);
 
-    const worker = pickWorker();
-    const func = functionId ? functions.findById(functionId) : null;
+    const worker = await pickWorker();
+    const func = functionId ? await functions.findById(functionId) : null;
 
     const container = await launchContainer(worker.id, {
         image: func ? func.image : undefined,
@@ -102,11 +102,11 @@ async function replenishPool(functionId) {
     _replenishing.add(key);
 
     try {
-    const func = functionId ? functions.findById(functionId) : null;
+    const func = functionId ? await functions.findById(functionId) : null;
     const minWarm = func && func.warm_count !== undefined ? func.warm_count : WARM_POOL_MIN;
     const maxContainers = func && func.max_containers !== undefined ? func.max_containers : WARM_POOL_MAX;
 
-    const currentCount = warmPool.countWarm(functionId);
+    const currentCount = await warmPool.countWarm(functionId);
     const needed = minWarm - currentCount;
 
     if (needed <= 0) {
@@ -114,7 +114,7 @@ async function replenishPool(functionId) {
         return;
     }
 
-    const totalActiveForFunc = warmPool.findAll().filter(c => c.function_id === functionId).length;
+    const totalActiveForFunc = (await warmPool.findAll()).filter(c => c.function_id === functionId).length;
     if (totalActiveForFunc >= maxContainers) {
         logger.debug(`Warm pool: at max capacity for function (${totalActiveForFunc}/${maxContainers}) — skipping`);
         return;
@@ -125,7 +125,7 @@ async function replenishPool(functionId) {
 
     for (let i = 0; i < toCreate; i++) {
         try {
-            const worker = pickWorker();
+            const worker = await pickWorker();
             const container = await launchContainer(worker.id, {
                 image: func ? func.image : undefined,
                 agent_cmd: func ? func.agent_cmd : undefined,
@@ -139,7 +139,7 @@ async function replenishPool(functionId) {
                 pause_after: true,
             });
 
-            warmPool.insert({
+            await warmPool.insert({
                 container_id: container.id,
                 worker_id: worker.id,
                 function_id: functionId || null,
@@ -159,8 +159,8 @@ async function replenishPool(functionId) {
 /**
  * Get pool statistics.
  */
-function getPoolStats() {
-    const allWarm = warmPool.findAll();
+async function getPoolStats() {
+    const allWarm = await warmPool.findAll();
     const warm = allWarm.filter(e => e.status === 'warm');
     const claimed = allWarm.filter(e => e.status === 'claimed');
 

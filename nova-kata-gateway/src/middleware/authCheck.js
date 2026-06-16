@@ -35,7 +35,7 @@ export default async function authCheck(req, res, next) {
         const cacheKey = `key:${token}:${functionData.id}`;
         let keyData = await cache.get(cacheKey);
         if (!keyData) {
-            keyData = apiKeys.findByKeyAndFunction(token, functionData.id);
+            keyData = await apiKeys.findByKeyAndFunction(token, functionData.id);
             if (keyData) {
                 await cache.set(cacheKey, keyData, API_KEY_CACHE_TTL);
             }

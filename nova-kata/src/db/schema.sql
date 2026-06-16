@@ -1,3 +1,6 @@
+-- PostgreSQL schema for Nova Kata
+-- Migrated from SQLite: datetime('now') → CURRENT_TIMESTAMP, AUTOINCREMENT → SERIAL, ? → $1
+
 -- workers table
 CREATE TABLE IF NOT EXISTS workers (
     id TEXT PRIMARY KEY,
@@ -6,10 +9,12 @@ CREATE TABLE IF NOT EXISTS workers (
     password TEXT NOT NULL,
     ssh_port INTEGER NOT NULL DEFAULT 22,
     status TEXT NOT NULL DEFAULT 'unknown',
-    created_at TEXT DEFAULT (datetime('now')),
-    updated_at TEXT DEFAULT (datetime('now')),
-    last_seen_at TEXT,
-    consecutive_failures INTEGER DEFAULT 0
+    created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+    last_seen_at TIMESTAMPTZ,
+    consecutive_failures INTEGER DEFAULT 0,
+    gcp_instance_name TEXT,
+    gcp_zone TEXT
 );
 
 -- functions table
@@ -28,8 +33,8 @@ CREATE TABLE IF NOT EXISTS functions (
     warm_count INTEGER DEFAULT 1,
     status TEXT NOT NULL DEFAULT 'active',
     auth_policy TEXT NOT NULL DEFAULT 'public',
-    created_at TEXT DEFAULT (datetime('now')),
-    updated_at TEXT DEFAULT (datetime('now'))
+    created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
 );
 
 -- api_keys table
@@ -38,8 +43,8 @@ CREATE TABLE IF NOT EXISTS api_keys (
     key TEXT NOT NULL UNIQUE,
     function_id TEXT NOT NULL,
     status TEXT NOT NULL DEFAULT 'active',
-    created_at TEXT DEFAULT (datetime('now')),
-    updated_at TEXT DEFAULT (datetime('now')),
+    created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (function_id) REFERENCES functions(id) ON DELETE CASCADE
 );
 
@@ -56,21 +61,21 @@ CREATE TABLE IF NOT EXISTS containers (
     status TEXT NOT NULL DEFAULT 'creating',
     function_id TEXT,
     metadata TEXT,
-    started_at TEXT DEFAULT (datetime('now')),
-    stopped_at TEXT,
+    started_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+    stopped_at TIMESTAMPTZ,
     FOREIGN KEY (worker_id) REFERENCES workers(id) ON DELETE CASCADE,
     FOREIGN KEY (function_id) REFERENCES functions(id) ON DELETE SET NULL
 );
 
 -- warm_pool table – tracks paused containers ready for reuse
 CREATE TABLE IF NOT EXISTS warm_pool (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    id SERIAL PRIMARY KEY,
     container_id TEXT NOT NULL,
     worker_id TEXT NOT NULL,
     function_id TEXT,
-    status TEXT NOT NULL DEFAULT 'warm', -- warm, claimed, paused
-    created_at TEXT DEFAULT (datetime('now')),
-    claimed_at TEXT,
+    status TEXT NOT NULL DEFAULT 'warm',
+    created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+    claimed_at TIMESTAMPTZ,
     FOREIGN KEY (container_id) REFERENCES containers(id) ON DELETE CASCADE,
     FOREIGN KEY (worker_id) REFERENCES workers(id) ON DELETE CASCADE,
     FOREIGN KEY (function_id) REFERENCES functions(id) ON DELETE SET NULL
@@ -78,11 +83,11 @@ CREATE TABLE IF NOT EXISTS warm_pool (
 
 -- worker_events table – audit log for workers
 CREATE TABLE IF NOT EXISTS worker_events (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    id SERIAL PRIMARY KEY,
     worker_id TEXT NOT NULL,
     event_type TEXT NOT NULL,
     message TEXT,
-    created_at TEXT DEFAULT (datetime('now')),
+    created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (worker_id) REFERENCES workers(id) ON DELETE CASCADE
 );
 
@@ -95,6 +100,12 @@ CREATE TABLE IF NOT EXISTS invocations (
     latency_ms INTEGER,
     request_method TEXT,
     request_path TEXT,
-    created_at TEXT DEFAULT (datetime('now')),
+    created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (function_id) REFERENCES functions(id) ON DELETE CASCADE
+);
+
+-- Migration tracking table
+CREATE TABLE IF NOT EXISTS pg_migrations (
+    name TEXT PRIMARY KEY,
+    applied_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
 );

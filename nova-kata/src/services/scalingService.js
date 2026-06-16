@@ -38,7 +38,7 @@ let lastScaleOutAt    = 0;   // monotonic ms from performance.now()
  * @returns {{ triggered: boolean, reason: string, metrics?: object }}
  */
 async function checkAndScale() {
-    const metrics = getMetrics();
+    const metrics = await getMetrics();
 
     // Guard: already scaling
     if (scalingInProgress) {
@@ -146,9 +146,9 @@ async function scaleOut({ region, onLine } = {}) {
         });
 
         // Store GCP-specific metadata on the worker row
-        workers.setGcpMeta(worker.id, { instanceName, zone });
+        await workers.setGcpMeta(worker.id, { instanceName, zone });
 
-        events.insert({
+        await events.insert({
             worker_id  : worker.id,
             event_type : 'auto_scaled',
             message    : `Auto-scaled from region ${region}. GCP instance: ${instanceName} (${zone})`,
@@ -174,7 +174,7 @@ async function scaleOut({ region, onLine } = {}) {
         }
 
         // Record failure event in DB so dashboard can show it
-        events.insert({
+        await events.insert({
             worker_id  : null,
             event_type : 'scale_failed',
             message    : `Scale-out failed: ${err.message}${gcpInstance ? ` (VM rolled back)` : ' (no VM created)'}`,
@@ -192,7 +192,7 @@ async function scaleOut({ region, onLine } = {}) {
  * @param {string} workerId
  */
 async function scaleIn(workerId) {
-    const worker = workers.findById(workerId);
+    const worker = await workers.findById(workerId);
     if (!worker) throw new Error(`Worker ${workerId} not found`);
 
     const { gcp_instance_name, gcp_zone } = worker;
@@ -203,13 +203,13 @@ async function scaleIn(workerId) {
     logger.info(`[AutoScale] Scaling in: deleting worker ${workerId} / VM ${gcp_instance_name}...`);
 
     // Mark worker retired first so it stops receiving traffic
-    workers.updateStatus(workerId, 'retired');
+    await workers.updateStatus(workerId, 'retired');
 
     // Stop all containers on this worker before deleting VM
-    const workerContainers = containers.findByWorker(workerId);
+    const workerContainers = await containers.findByWorker(workerId);
     for (const c of workerContainers) {
         try {
-            containers.updateStatus(c.id, 'stopped');
+            await containers.updateStatus(c.id, 'stopped');
         } catch (_) {}
     }
     logger.info(`[AutoScale] Stopped ${workerContainers.length} containers on worker ${workerId}`);
@@ -220,7 +220,7 @@ async function scaleIn(workerId) {
     } catch (err) {
         // VM deletion failed — keep worker in DB as 'retired' for manual cleanup
         logger.error(`[AutoScale] VM deletion failed for ${gcp_instance_name}: ${err.message}. Worker kept as 'retired' for manual cleanup.`);
-        events.insert({
+        await events.insert({
             worker_id  : workerId,
             event_type : 'scale_in_failed',
             message    : `VM deletion failed: ${err.message}. Manual cleanup needed for ${gcp_instance_name} in ${gcp_zone}.`,
@@ -228,9 +228,9 @@ async function scaleIn(workerId) {
         throw err;
     }
 
-    workers.delete(workerId);
+    await workers.delete(workerId);
 
-    events.insert({
+    await events.insert({
         worker_id  : workerId,
         event_type : 'scaled_in',
         message    : `Worker scaled in. VM ${gcp_instance_name} deleted.`,
@@ -244,17 +244,15 @@ async function scaleIn(workerId) {
 /**
  * Compute current cluster load metrics.
  */
-function getMetrics() {
-    const all     = workers.findAll().filter(w => w.status !== 'retired');
+async function getMetrics() {
+    const all     = (await workers.findAll()).filter(w => w.status !== 'retired');
     const healthy = all.filter(w => w.status === 'healthy');
 
     const maxContainersPerWorker = cfg().maxContainersPerWorker;
     const clusterCapacity = healthy.length * maxContainersPerWorker;
 
-    const activeContainers = healthy.reduce(
-        (sum, w) => sum + containers.countActiveByWorker(w.id),
-        0
-    );
+    const counts = await Promise.all(healthy.map(w => containers.countActiveByWorker(w.id)));
+    const activeContainers = counts.reduce((sum, c) => sum + c, 0);
 
     const utilisation = clusterCapacity > 0
         ? Math.min(1, activeContainers / clusterCapacity)

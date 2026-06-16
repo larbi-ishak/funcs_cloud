@@ -23,7 +23,7 @@ router.post('/execute', async (req, res) => {
         // when the gateway has a stale cached function_id from a deleted+re-deployed function
         if (functionId) {
             const { functions } = require('../db/database');
-            const func = functions.findById(functionId);
+            const func = await functions.findById(functionId);
             if (!func) {
                 logger.warn(`Execute rejected: function_id ${functionId} not found (stale gateway cache?)`);
                 return res.status(404).json({
@@ -55,10 +55,10 @@ router.post('/containers/launch', async (req, res) => {
     try {
         if (req.body.worker_id) {
             const { workers } = require('../db/database');
-            worker = workers.findById(req.body.worker_id);
+            worker = await workers.findById(req.body.worker_id);
             if (!worker) return res.status(404).json({ error: 'Specified worker not found' });
         } else {
-            worker = pickWorker();
+            worker = await pickWorker();
         }
     } catch (err) {
         return res.status(503).json({ error: err.message });
@@ -108,18 +108,18 @@ router.post('/containers/:id/unpause', async (req, res) => {
  *   unpause → serve requests → idle → release (pause + mark warm) → ready for next claim
  */
 router.post('/containers/:id/release', async (req, res) => {
-    const container = containers.findById(req.params.id);
+    const container = await containers.findById(req.params.id);
     if (!container) return res.status(404).json({ error: 'Container not found' });
 
     try {
         await pauseContainer(req.params.id);
 
         // Return this container to the warm pool
-        const existing = warmPool.findByContainer(req.params.id);
+        const existing = await warmPool.findByContainer(req.params.id);
         if (existing) {
-            warmPool.markWarm(req.params.id);
+            await warmPool.markWarm(req.params.id);
         } else {
-            warmPool.insert({
+            await warmPool.insert({
                 container_id: container.id,
                 worker_id:    container.worker_id,
                 function_id:  container.function_id || null,
@@ -136,21 +136,21 @@ router.post('/containers/:id/release', async (req, res) => {
 });
 
 // ─── GET /containers ──────────────────────────────────────────────────────────
-router.get('/containers', (req, res) => {
-    const all = containers.findAll();
+router.get('/containers', async (req, res) => {
+    const all = await containers.findAll();
     return res.json({ containers: all, total: all.length });
 });
 
 // ─── GET /containers/:id ──────────────────────────────────────────────────────
-router.get('/containers/:id', (req, res) => {
-    const container = containers.findById(req.params.id);
+router.get('/containers/:id', async (req, res) => {
+    const container = await containers.findById(req.params.id);
     if (!container) return res.status(404).json({ error: 'Container not found' });
     return res.json({ container });
 });
 
 // ─── DELETE /containers/:id ───────────────────────────────────────────────────
 router.delete('/containers/:id', async (req, res) => {
-    const container = containers.findById(req.params.id);
+    const container = await containers.findById(req.params.id);
     if (!container) return res.status(404).json({ error: 'Container not found' });
 
     try {
@@ -162,8 +162,8 @@ router.delete('/containers/:id', async (req, res) => {
 });
 
 // ─── GET /warm-pool ───────────────────────────────────────────────────────────
-router.get('/warm-pool', (req, res) => {
-    const stats = getPoolStats();
+router.get('/warm-pool', async (req, res) => {
+    const stats = await getPoolStats();
     return res.json(stats);
 });
 
@@ -171,7 +171,7 @@ router.get('/warm-pool', (req, res) => {
 router.post('/warm-pool/replenish', async (req, res) => {
     try {
         await replenishPool(req.body.function_id || null);
-        const stats = getPoolStats();
+        const stats = await getPoolStats();
         return res.json({ success: true, pool: stats });
     } catch (err) {
         return res.status(500).json({ error: err.message });
@@ -179,9 +179,9 @@ router.post('/warm-pool/replenish', async (req, res) => {
 });
 
 // ─── GET /metrics ─────────────────────────────────────────────────────────────
-router.get('/metrics', (req, res) => {
-    const metrics = getPoolMetrics();
-    const pool = getPoolStats();
+router.get('/metrics', async (req, res) => {
+    const metrics = await getPoolMetrics();
+    const pool = await getPoolStats();
     return res.json({ ...metrics, warm_pool: pool });
 });
 

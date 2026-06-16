@@ -43,14 +43,14 @@ async function initWorker(params) {
     } catch (err) {
         // Register as PENDING — health check will retry validation
         const id = uuidv4();
-        workers.insert({ id, ip, username, password: encrypt(password), ssh_port, status: 'pending' });
-        events.insert({
+        await workers.insert({ id, ip, username, password: encrypt(password), ssh_port, status: 'pending' });
+        await events.insert({
             worker_id: id,
             event_type: 'init_pending',
             message: `SSH failed: ${err.message}. Registered as pending — health check will retry.`,
         });
         logger.warn(`Worker ${ip} registered as PENDING (SSH failed: ${err.message})`);
-        const worker = workers.findById(id);
+        const worker = await workers.findById(id);
         const { password: _, ...safe } = worker;
         return safe;
     }
@@ -95,7 +95,7 @@ async function initWorker(params) {
 
         // ── 6. Persist ───────────────────────────────────────────────────────────
         const id = uuidv4();
-        workers.insert({
+        await workers.insert({
             id,
             ip,
             username,
@@ -104,14 +104,14 @@ async function initWorker(params) {
             status: 'healthy',
         });
 
-        events.insert({
+        await events.insert({
             worker_id: id,
             event_type: 'init_success',
             message: `Validated. ${ctrVersion}`,
         });
 
         logger.info(`Worker ${ip} registered as ${id}`);
-        const worker = workers.findById(id);
+        const worker = await workers.findById(id);
         // Don't return password
         const { password: _, ...safe } = worker;
         return safe;
@@ -129,7 +129,7 @@ async function initWorker(params) {
  * Updates DB accordingly. Returns { healthy: bool, reason? }
  */
 async function checkWorkerHealth(workerId) {
-    const worker = workers.findById(workerId);
+    const worker = await workers.findById(workerId);
     if (!worker) throw new Error(`Worker ${workerId} not found`);
 
     // ── Try Worker API first (no SSH handshake) ─────────────────────────────
@@ -142,8 +142,8 @@ async function checkWorkerHealth(workerId) {
 
             if (response.data && response.data.containerd_ok) {
                 // Worker API reports healthy — no SSH needed
-                workers.updateLastSeen(workerId);
-                events.insert({
+                await workers.updateLastSeen(workerId);
+                await events.insert({
                     worker_id: workerId,
                     event_type: 'health_ok',
                     message: response.data.uptime_cmd || 'ok (via Worker API)',
@@ -204,16 +204,16 @@ async function checkWorkerHealth(workerId) {
             }
 
             logger.info(`Worker ${workerId} (${worker.ip}) validation passed — marking HEALTHY`);
-            workers.updateStatus(workerId, 'healthy');
+            await workers.updateStatus(workerId, 'healthy');
         }
 
-        workers.updateLastSeen(workerId);
-        events.insert({ worker_id: workerId, event_type: 'health_ok', message: ping.stdout });
+        await workers.updateLastSeen(workerId);
+        await events.insert({ worker_id: workerId, event_type: 'health_ok', message: ping.stdout });
 
         return { healthy: true, via: 'ssh' };
     } catch (err) {
-        workers.incrementFailures(workerId);
-        const fresh = workers.findById(workerId);
+        await workers.incrementFailures(workerId);
+        const fresh = await workers.findById(workerId);
         if (!fresh) return { healthy: false, reason: 'Worker deleted during health check' };
 
         const maxFails = parseInt(process.env.MAX_CONSECUTIVE_FAILURES) || 3;
@@ -222,9 +222,9 @@ async function checkWorkerHealth(workerId) {
         if (fresh.consecutive_failures >= maxFails && fresh.consecutive_failures < recoveryMaxFails) {
             // Grace period: mark as faulty but keep trying
             if (fresh.status !== 'faulty') {
-                workers.updateStatus(workerId, 'faulty');
+                await workers.updateStatus(workerId, 'faulty');
                 logger.warn(`Worker ${workerId} (${worker.ip}) marked FAULTY after ${fresh.consecutive_failures} failures — will keep retrying (up to ${recoveryMaxFails})`);
-                events.insert({ worker_id: workerId, event_type: 'health_faulty', message: `Marked faulty after ${fresh.consecutive_failures} failures: ${err.message}` });
+                await events.insert({ worker_id: workerId, event_type: 'health_faulty', message: `Marked faulty after ${fresh.consecutive_failures} failures: ${err.message}` });
             } else {
                 logger.debug(`Worker ${workerId} still faulty (${fresh.consecutive_failures}/${recoveryMaxFails} failures) — retrying`);
             }
@@ -233,11 +233,11 @@ async function checkWorkerHealth(workerId) {
 
         if (fresh.consecutive_failures >= recoveryMaxFails) {
             // Recovery exhausted: retire and clean up
-            warmPool.removeByWorkerId(workerId);
-            containers.removeByWorkerId(workerId);
-            workers.updateStatus(workerId, 'retired');
+            await warmPool.removeByWorkerId(workerId);
+            await containers.removeByWorkerId(workerId);
+            await workers.updateStatus(workerId, 'retired');
             logger.warn(`Worker ${workerId} (${worker.ip}) RETIRED after ${fresh.consecutive_failures} consecutive failures (recovery exhausted)`);
-            events.insert({ worker_id: workerId, event_type: 'worker_retired', message: `Auto-retired after ${fresh.consecutive_failures} failures (recovery max: ${recoveryMaxFails}): ${err.message}` });
+            await events.insert({ worker_id: workerId, event_type: 'worker_retired', message: `Auto-retired after ${fresh.consecutive_failures} failures (recovery max: ${recoveryMaxFails}): ${err.message}` });
 
             // Notify gateway to invalidate its container cache
             try {
@@ -250,8 +250,8 @@ async function checkWorkerHealth(workerId) {
 
         // Below maxFails: mark degraded
         let newStatus = fresh.status === 'pending' ? 'pending' : 'degraded';
-        workers.updateStatus(workerId, newStatus);
-        events.insert({ worker_id: workerId, event_type: 'health_fail', message: err.message });
+        await workers.updateStatus(workerId, newStatus);
+        await events.insert({ worker_id: workerId, event_type: 'health_fail', message: err.message });
 
         return { healthy: false, reason: err.message, status: newStatus };
     } finally {
@@ -262,20 +262,20 @@ async function checkWorkerHealth(workerId) {
 /**
  * Retire (mark faulty + optionally delete) a worker.
  */
-function retireWorker(workerId, { remove = false } = {}) {
-    const worker = workers.findById(workerId);
+async function retireWorker(workerId, { remove = false } = {}) {
+    const worker = await workers.findById(workerId);
     if (!worker) throw new Error(`Worker ${workerId} not found`);
 
     // Always clean up warm pool entries for retired workers
-    warmPool.removeByWorkerId(workerId);
+    await warmPool.removeByWorkerId(workerId);
 
-    workers.updateStatus(workerId, 'retired');
-    events.insert({ worker_id: workerId, event_type: 'retired', message: 'Manually retired' });
+    await workers.updateStatus(workerId, 'retired');
+    await events.insert({ worker_id: workerId, event_type: 'retired', message: 'Manually retired' });
 
     if (remove) {
         // Cascade: remove containers for this worker
-        containers.removeByWorkerId(workerId);
-        workers.delete(workerId);
+        await containers.removeByWorkerId(workerId);
+        await workers.delete(workerId);
         logger.info(`Worker ${workerId} deleted (warm pool + containers cleaned up)`);
     } else {
         logger.info(`Worker ${workerId} retired (warm pool cleaned up)`);
@@ -295,14 +295,14 @@ class InitError extends Error {
  * Used for manual retry after fixing a faulty/retired worker.
  */
 async function resetAndRetryWorker(workerId) {
-    const worker = workers.findById(workerId);
+    const worker = await workers.findById(workerId);
     if (!worker) throw new Error(`Worker ${workerId} not found`);
 
     logger.info(`Manual retry requested for worker ${workerId} (${worker.ip}) — resetting failures`);
 
     // Reset failures and mark as pending so health check will validate
-    workers.resetFailures(workerId);
-    workers.updateStatus(workerId, 'pending');
+    await workers.resetFailures(workerId);
+    await workers.updateStatus(workerId, 'pending');
 
     // Immediately run health check
     const result = await checkWorkerHealth(workerId);

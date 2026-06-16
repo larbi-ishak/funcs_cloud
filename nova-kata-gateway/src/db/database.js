@@ -1,73 +1,67 @@
-import Database from 'better-sqlite3';
-import fs from 'fs';
-import path from 'path';
-import { fileURLToPath } from 'url';
+import pg from 'pg';
 import logger from '../utils/logger.js';
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
+const { Pool } = pg;
 
-const dbFile = process.env.DB_PATH || '../nova-kata/data/nova-kata.db';
-const projectRoot = path.resolve(__dirname, '../../');
-const DB_PATH = path.resolve(projectRoot, dbFile);
+const DATABASE_URL = process.env.DATABASE_URL || 'postgresql://nova_kata:nova_kata_secret@localhost:5432/nova_kata';
 
-let db;
+let pool;
 
 /**
- * Initialise the read-only database connection.
- * better-sqlite3 opens the file directly — no reloadDb() needed,
- * reads always return the latest data (thanks to WAL mode).
+ * Initialise the read-only PostgreSQL connection pool.
+ * The gateway never writes to the database — only reads for routing/auth.
  */
-function initDb() {
-    if (!fs.existsSync(DB_PATH)) {
-        throw new Error(`Database file not found at ${DB_PATH}. Is Nova Kata running?`);
+async function initDb() {
+    pool = new Pool({ connectionString: DATABASE_URL, max: 10 });
+
+    // Test connection
+    const client = await pool.connect();
+    try {
+        await client.query('SELECT 1');
+        logger.info(`PostgreSQL connected (read-only): ${DATABASE_URL.replace(/:[^:@]+@/, ':****@')}`);
+    } finally {
+        client.release();
     }
-
-    // Open in read-only mode — the gateway never writes to the database.
-    // WAL mode is set by Nova Kata (the writer); the gateway benefits from it automatically.
-    db = new Database(DB_PATH, { readonly: true });
-
-    logger.info(`Loaded read-only database from ${DB_PATH}`);
 }
 
 /**
- * Query a single row. With better-sqlite3, this always reads the latest
- * data from disk — no reloadDb() needed.
+ * Query a single row.
  */
-function queryOne(sql, params = []) {
-    return db.prepare(sql).get(...params);
+async function queryOne(sql, params = []) {
+    const result = await pool.query(sql, params);
+    return result.rows[0] || null;
 }
 
 /**
  * Query multiple rows.
  */
-function queryAll(sql, params = []) {
-    return db.prepare(sql).all(...params);
+async function queryAll(sql, params = []) {
+    const result = await pool.query(sql, params);
+    return result.rows;
 }
 
 const functions = {
-    findAll() {
+    async findAll() {
         return queryAll('SELECT * FROM functions');
     },
-    findByNameAndRegion(name, region) {
-        return queryOne('SELECT * FROM functions WHERE name = ? AND region = ?', [name, region]);
+    async findByNameAndRegion(name, region) {
+        return queryOne('SELECT * FROM functions WHERE name = $1 AND region = $2', [name, region]);
     },
-    findByName(name) {
-        return queryOne('SELECT * FROM functions WHERE name = ?', [name]);
+    async findByName(name) {
+        return queryOne('SELECT * FROM functions WHERE name = $1', [name]);
     }
 };
 
 const apiKeys = {
-    findByKey(key) {
-        return queryOne("SELECT * FROM api_keys WHERE key = ? AND status = 'active'", [key]);
+    async findByKey(key) {
+        return queryOne("SELECT * FROM api_keys WHERE key = $1 AND status = 'active'", [key]);
     },
     /**
      * Find an active API key that belongs to a specific function.
      * Single atomic check — ensures the key exists AND belongs to the requested function.
-     * More secure than findByKey + code check: doesn't leak key data for other functions.
      */
-    findByKeyAndFunction(key, functionId) {
-        return queryOne("SELECT * FROM api_keys WHERE key = ? AND function_id = ? AND status = 'active'", [key, functionId]);
+    async findByKeyAndFunction(key, functionId) {
+        return queryOne("SELECT * FROM api_keys WHERE key = $1 AND function_id = $2 AND status = 'active'", [key, functionId]);
     }
 };
 
@@ -75,9 +69,9 @@ const containers = {
     /**
      * Find a single running container for the given function.
      */
-    findRunningByFunction(functionId) {
+    async findRunningByFunction(functionId) {
         return queryOne(
-            "SELECT * FROM containers WHERE function_id = ? AND status = 'running' LIMIT 1",
+            "SELECT * FROM containers WHERE function_id = $1 AND status = 'running' LIMIT 1",
             [functionId]
         );
     },
@@ -85,9 +79,9 @@ const containers = {
      * Find ALL running containers for the given function.
      * Used for round-robin pool routing — distributes traffic across multiple containers.
      */
-    findAllRunningByFunction(functionId) {
+    async findAllRunningByFunction(functionId) {
         return queryAll(
-            "SELECT * FROM containers WHERE function_id = ? AND status = 'running'",
+            "SELECT * FROM containers WHERE function_id = $1 AND status = 'running'",
             [functionId]
         );
     }

@@ -1,125 +1,88 @@
-const Database = require('better-sqlite3');
-const path = require('path');
+const { Pool } = require('pg');
 const fs = require('fs');
+const path = require('path');
 const logger = require('../utils/logger');
 
-const DB_PATH = process.env.DB_PATH || './data/nova-kata.db';
+const DATABASE_URL = process.env.DATABASE_URL || 'postgresql://nova_kata:nova_kata_secret@localhost:5432/nova_kata';
 const SCHEMA_PATH = path.join(__dirname, 'schema.sql');
 
-let db;
+let pool;
 
 function getDb() {
-    if (!db) throw new Error('Database not initialised. Call initDb() first.');
-    return db;
+    if (!pool) throw new Error('Database not initialised. Call initDb() first.');
+    return pool;
 }
 
-function initDb() {
-    const dbDir = path.dirname(path.resolve(DB_PATH));
-    if (!fs.existsSync(dbDir)) fs.mkdirSync(dbDir, { recursive: true });
+async function initDb() {
+    pool = new Pool({ connectionString: DATABASE_URL, max: 20 });
 
-    const absPath = path.resolve(DB_PATH);
-    const exists = fs.existsSync(absPath);
-
-    db = new Database(absPath);
-    logger.info(`SQLite database ${exists ? 'loaded' : 'created'} from ${absPath}`);
-
-    // WAL mode — allows concurrent reads from the gateway while this process writes
-    db.pragma('journal_mode = WAL');
-    db.pragma('foreign_keys = ON');
-
-    const schema = fs.readFileSync(SCHEMA_PATH, 'utf8');
-    db.exec(schema);
-
-    // Run auto-migrations
+    // Test connection
+    const client = await pool.connect();
     try {
-        db.exec('ALTER TABLE functions ADD COLUMN memory_limit INTEGER DEFAULT 512;');
-        logger.info('Migration: Added memory_limit to functions table');
-    } catch (e) {}
-    try {
-        db.exec('ALTER TABLE functions ADD COLUMN cpu_limit REAL DEFAULT 1.0;');
-        logger.info('Migration: Added cpu_limit to functions table');
-    } catch (e) {}
-    try {
-        db.exec('ALTER TABLE functions ADD COLUMN storage_limit INTEGER DEFAULT 512;');
-        logger.info('Migration: Added storage_limit to functions table');
-    } catch (e) {}
-    try {
-        db.exec('ALTER TABLE functions ADD COLUMN max_containers INTEGER DEFAULT 10;');
-        logger.info('Migration: Added max_containers to functions table');
-    } catch (e) {}
-    try {
-        db.exec('ALTER TABLE functions ADD COLUMN warm_count INTEGER DEFAULT 1;');
-        logger.info('Migration: Added warm_count to functions table');
-    } catch (e) {}
-
-    try {
-        db.exec(`
-            CREATE TABLE IF NOT EXISTS invocations (
-                id TEXT PRIMARY KEY,
-                function_id TEXT NOT NULL,
-                container_id TEXT,
-                status_code INTEGER,
-                latency_ms INTEGER,
-                request_method TEXT,
-                request_path TEXT,
-                created_at TEXT DEFAULT (datetime('now')),
-                FOREIGN KEY (function_id) REFERENCES functions(id) ON DELETE CASCADE
-            );
-        `);
-    } catch (e) {}
-
-    // GCP auto-scaling metadata
-    try {
-        db.exec('ALTER TABLE workers ADD COLUMN gcp_instance_name TEXT;');
-        logger.info('Migration: Added gcp_instance_name to workers table');
-    } catch (e) {}
-    try {
-        db.exec('ALTER TABLE workers ADD COLUMN gcp_zone TEXT;');
-        logger.info('Migration: Added gcp_zone to workers table');
-    } catch (e) {}
-
-    // Fix legacy image tags: prepend REGISTRY_HOST/ to images missing a registry prefix
-    try {
-        const legacyImages = queryAll(
-            "SELECT id, image FROM functions WHERE image IS NOT NULL AND image NOT LIKE '%/%'"
-        );
-        if (legacyImages.length > 0) {
-            const updateStmt = db.prepare('UPDATE functions SET image = ? WHERE id = ?');
-            const updateMany = db.transaction((rows) => {
-                for (const row of rows) {
-                    updateStmt.run(`${process.env.REGISTRY_HOST || 'localhost:5000'}/${row.image}`, row.id);
-                }
-            });
-            updateMany(legacyImages);
-            logger.info(`Migration: Updated ${legacyImages.length} function(s) with registry-prefixed image tags`);
-        }
-    } catch (e) {
-        logger.warn(`Migration: Failed to update legacy image tags: ${e.message}`);
+        await client.query('SELECT 1');
+        logger.info(`PostgreSQL connected: ${DATABASE_URL.replace(/:[^:@]+@/, ':****@')}`);
+    } finally {
+        client.release();
     }
 
-    return db;
+    // Run schema
+    const schema = fs.readFileSync(SCHEMA_PATH, 'utf8');
+    await pool.query(schema);
+    logger.info('PostgreSQL schema applied');
+
+    // Run tracked migrations (idempotent — each runs only once)
+    const migrations = [
+        {
+            name: 'fix_legacy_image_tags',
+            async run() {
+                const legacyImages = await queryAll(
+                    "SELECT id, image FROM functions WHERE image IS NOT NULL AND image NOT LIKE '%/%'"
+                );
+                if (legacyImages.length > 0) {
+                    const registryHost = process.env.REGISTRY_HOST || 'localhost:5000';
+                    for (const row of legacyImages) {
+                        await run('UPDATE functions SET image = $1 WHERE id = $2', [`${registryHost}/${row.image}`, row.id]);
+                    }
+                    logger.info(`Migration: Updated ${legacyImages.length} function(s) with registry-prefixed image tags`);
+                }
+            },
+        },
+    ];
+
+    for (const m of migrations) {
+        const exists = await queryOne("SELECT 1 FROM pg_migrations WHERE name = $1", [m.name]);
+        if (!exists) {
+            await m.run();
+            await run("INSERT INTO pg_migrations (name) VALUES ($1)", [m.name]);
+            logger.info(`Migration applied: ${m.name}`);
+        }
+    }
+
+    return pool;
 }
 
 // ─── Query helpers ────────────────────────────────────────────────────────────
-// better-sqlite3 reads/writes directly to the file — no persist() or reloadDb() needed.
 
-function queryAll(sql, params = []) {
-    return db.prepare(sql).all(...params);
+async function queryAll(sql, params = []) {
+    const result = await pool.query(sql, params);
+    return result.rows;
 }
 
-function queryOne(sql, params = []) {
-    return db.prepare(sql).get(...params);
+async function queryOne(sql, params = []) {
+    const result = await pool.query(sql, params);
+    return result.rows[0] || null;
 }
 
-function run(sql, params = []) {
-    db.prepare(sql).run(...params);
+async function run(sql, params = []) {
+    await pool.query(sql, params);
 }
 
 function namedToPositional(sql, obj) {
     const values = [];
+    let idx = 1;
     const transformed = sql.replace(/@(\w+)/g, (_, key) => {
         values.push(obj[key] !== undefined ? obj[key] : null);
-        return '?';
+        return `$${idx++}`;
     });
     return { sql: transformed, values };
 }
@@ -127,71 +90,71 @@ function namedToPositional(sql, obj) {
 // ─── workers ──────────────────────────────────────────────────────────────────
 
 const workers = {
-    insert(w) {
+    async insert(w) {
         const { sql: s, values } = namedToPositional(
             `INSERT INTO workers (id, ip, username, password, ssh_port, status)
              VALUES (@id, @ip, @username, @password, @ssh_port, @status)`,
             w
         );
-        run(s, values);
+        await run(s, values);
     },
 
-    findAll() {
+    async findAll() {
         return queryAll('SELECT * FROM workers ORDER BY created_at DESC');
     },
 
-    findById(id) {
-        return queryOne('SELECT * FROM workers WHERE id = ?', [id]);
+    async findById(id) {
+        return queryOne('SELECT * FROM workers WHERE id = $1', [id]);
     },
 
-    findHealthy() {
+    async findHealthy() {
         return queryAll("SELECT * FROM workers WHERE status = 'healthy' ORDER BY created_at ASC");
     },
 
-    updateStatus(id, status) {
-        run(
-            `UPDATE workers SET status = ?, updated_at = datetime('now') WHERE id = ?`,
+    async updateStatus(id, status) {
+        await run(
+            `UPDATE workers SET status = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2`,
             [status, id]
         );
     },
 
-    updateLastSeen(id) {
-        run(
+    async updateLastSeen(id) {
+        await run(
             `UPDATE workers
-             SET last_seen_at = datetime('now'), consecutive_failures = 0,
-                 status = 'healthy', updated_at = datetime('now')
-             WHERE id = ?`,
+             SET last_seen_at = CURRENT_TIMESTAMP, consecutive_failures = 0,
+                 status = 'healthy', updated_at = CURRENT_TIMESTAMP
+             WHERE id = $1`,
             [id]
         );
     },
 
-    incrementFailures(id) {
-        run(
+    async incrementFailures(id) {
+        await run(
             `UPDATE workers
              SET consecutive_failures = consecutive_failures + 1,
-                 updated_at = datetime('now')
-             WHERE id = ?`,
+                 updated_at = CURRENT_TIMESTAMP
+             WHERE id = $1`,
             [id]
         );
     },
 
-    resetFailures(id) {
-        run(
+    async resetFailures(id) {
+        await run(
             `UPDATE workers
              SET consecutive_failures = 0,
-                 updated_at = datetime('now')
-             WHERE id = ?`,
+                 updated_at = CURRENT_TIMESTAMP
+             WHERE id = $1`,
             [id]
         );
     },
 
-    delete(id) {
-        run('DELETE FROM workers WHERE id = ?', [id]);
+    async delete(id) {
+        await run('DELETE FROM workers WHERE id = $1', [id]);
     },
 
-    setGcpMeta(id, { instanceName, zone }) {
-        run(
-            `UPDATE workers SET gcp_instance_name = ?, gcp_zone = ?, updated_at = datetime('now') WHERE id = ?`,
+    async setGcpMeta(id, { instanceName, zone }) {
+        await run(
+            `UPDATE workers SET gcp_instance_name = $1, gcp_zone = $2, updated_at = CURRENT_TIMESTAMP WHERE id = $3`,
             [instanceName, zone, id]
         );
     },
@@ -200,7 +163,7 @@ const workers = {
 // ─── containers ───────────────────────────────────────────────────────────────
 
 const containers = {
-    insert(c) {
+    async insert(c) {
         const { sql: s, values } = namedToPositional(
             `INSERT INTO containers
              (id, worker_id, container_name, image, runtime, container_ip,
@@ -210,142 +173,141 @@ const containers = {
               @host_port, @agent_port, @status, @function_id, @metadata, @started_at)`,
             c
         );
-        run(s, values);
+        await run(s, values);
     },
 
-    findAll() {
+    async findAll() {
         return queryAll('SELECT * FROM containers ORDER BY started_at DESC');
     },
 
-    findById(id) {
-        return queryOne('SELECT * FROM containers WHERE id = ?', [id]);
+    async findById(id) {
+        return queryOne('SELECT * FROM containers WHERE id = $1', [id]);
     },
 
-    findByWorker(workerId) {
+    async findByWorker(workerId) {
         return queryAll(
-            "SELECT * FROM containers WHERE worker_id = ? AND status NOT IN ('stopped','failed')",
+            "SELECT * FROM containers WHERE worker_id = $1 AND status NOT IN ('stopped','failed')",
             [workerId]
         );
     },
 
-    findByName(name) {
-        return queryOne('SELECT * FROM containers WHERE container_name = ?', [name]);
+    async findByName(name) {
+        return queryOne('SELECT * FROM containers WHERE container_name = $1', [name]);
     },
 
-    countActiveByWorker(workerId) {
-        const row = queryOne(
-            "SELECT COUNT(*) as cnt FROM containers WHERE worker_id = ? AND status IN ('creating','running','paused')",
+    async countActiveByWorker(workerId) {
+        const row = await queryOne(
+            "SELECT COUNT(*) as cnt FROM containers WHERE worker_id = $1 AND status IN ('creating','running','paused')",
             [workerId]
         );
-        return row ? row.cnt : 0;
+        return row ? parseInt(row.cnt) : 0;
     },
 
-    updateStatus(id, status, extra = {}) {
-        // Single atomic UPDATE — prevents concurrent reads from seeing partial state
-        // COALESCE keeps existing value when the parameter is null (PostgreSQL-compatible)
+    async updateStatus(id, status, extra = {}) {
         const isTerminal = ['stopped', 'failed'].includes(status);
-        run(
+        await run(
             `UPDATE containers SET
-                status = ?,
-                container_ip = COALESCE(?, container_ip),
-                host_port = COALESCE(?, host_port),
-                started_at = COALESCE(?, started_at),
-                stopped_at = CASE WHEN ? THEN datetime('now') ELSE stopped_at END
-             WHERE id = ?`,
+                status = $1,
+                container_ip = COALESCE($2, container_ip),
+                host_port = COALESCE($3, host_port),
+                started_at = COALESCE($4, started_at),
+                stopped_at = CASE WHEN $5 THEN CURRENT_TIMESTAMP ELSE stopped_at END
+             WHERE id = $6`,
             [status, extra.container_ip || null, extra.host_port || null, extra.started_at || null, isTerminal ? 1 : 0, id]
         );
     },
 
-    delete(id) {
-        run('DELETE FROM containers WHERE id = ?', [id]);
+    async delete(id) {
+        await run('DELETE FROM containers WHERE id = $1', [id]);
     },
 
-    removeByWorkerId(workerId) {
-        run('DELETE FROM containers WHERE worker_id = ?', [workerId]);
+    async removeByWorkerId(workerId) {
+        await run('DELETE FROM containers WHERE worker_id = $1', [workerId]);
     },
 };
 
 // ─── warm pool ────────────────────────────────────────────────────────────────
 
 const warmPool = {
-    insert(entry) {
+    async insert(entry) {
         const { sql: s, values } = namedToPositional(
             `INSERT INTO warm_pool (container_id, worker_id, function_id, status)
              VALUES (@container_id, @worker_id, @function_id, @status)`,
             entry
         );
-        run(s, values);
+        await run(s, values);
     },
 
-    /**
-     * Claim a warm container for a given function (or any if function_id is null).
-     * Returns the warm_pool row + container data.
-     *
-     * IMPORTANT: SELECT + UPDATE are wrapped in a transaction to prevent
-     * double-claiming under concurrent requests. Without the transaction,
-     * two callers could both SELECT the same 'warm' row before either
-     * UPDATEs it, causing both to be routed to the same container.
-     *
-     * PostgreSQL migration: Replace with SELECT ... FOR UPDATE SKIP LOCKED
-     * which is the standard pattern for work queues.
-     */
-    claimOne(functionId) {
-        const doClaim = db.transaction(() => {
+    async claimOne(functionId) {
+        const client = await pool.connect();
+        try {
+            await client.query('BEGIN');
+
             let row;
             if (functionId) {
-                row = queryOne(
+                const result = await client.query(
                     `SELECT wp.*, c.container_ip, c.host_port, c.worker_id, c.container_name, c.agent_port
                      FROM warm_pool wp
                      JOIN containers c ON c.id = wp.container_id
-                     WHERE wp.function_id = ? AND wp.status = 'warm'
-                     ORDER BY wp.created_at ASC LIMIT 1`,
+                     WHERE wp.function_id = $1 AND wp.status = 'warm'
+                     ORDER BY wp.created_at ASC LIMIT 1
+                     FOR UPDATE SKIP LOCKED`,
                     [functionId]
                 );
+                row = result.rows[0] || null;
             }
-            // Fallback: claim any warm container with no function_id
             if (!row) {
-                row = queryOne(
+                const result = await client.query(
                     `SELECT wp.*, c.container_ip, c.host_port, c.worker_id, c.container_name, c.agent_port
                      FROM warm_pool wp
                      JOIN containers c ON c.id = wp.container_id
                      WHERE wp.function_id IS NULL AND wp.status = 'warm'
-                     ORDER BY wp.created_at ASC LIMIT 1`,
+                     ORDER BY wp.created_at ASC LIMIT 1
+                     FOR UPDATE SKIP LOCKED`,
                     []
                 );
+                row = result.rows[0] || null;
             }
-            if (!row) return null;
+            if (!row) {
+                await client.query('COMMIT');
+                return null;
+            }
 
-            run(
-                `UPDATE warm_pool SET status = 'claimed', claimed_at = datetime('now') WHERE id = ?`,
+            await client.query(
+                `UPDATE warm_pool SET status = 'claimed', claimed_at = CURRENT_TIMESTAMP WHERE id = $1`,
                 [row.id]
             );
+            await client.query('COMMIT');
             return row;
-        });
-
-        return doClaim();
+        } catch (err) {
+            await client.query('ROLLBACK').catch(() => {});
+            throw err;
+        } finally {
+            client.release();
+        }
     },
 
-    countWarm(functionId) {
+    async countWarm(functionId) {
         if (functionId) {
-            const row = queryOne(
-                "SELECT COUNT(*) as cnt FROM warm_pool WHERE (function_id = ? OR function_id IS NULL) AND status = 'warm'",
+            const row = await queryOne(
+                "SELECT COUNT(*) as cnt FROM warm_pool WHERE (function_id = $1 OR function_id IS NULL) AND status = 'warm'",
                 [functionId]
             );
-            return row ? row.cnt : 0;
+            return row ? parseInt(row.cnt) : 0;
         }
-        const row = queryOne(
+        const row = await queryOne(
             "SELECT COUNT(*) as cnt FROM warm_pool WHERE status = 'warm'",
             []
         );
-        return row ? row.cnt : 0;
+        return row ? parseInt(row.cnt) : 0;
     },
 
-    countAll() {
-        const row = queryOne("SELECT COUNT(*) as cnt FROM warm_pool WHERE status = 'warm'", []);
-        return row ? row.cnt : 0;
+    async countAll() {
+        const row = await queryOne("SELECT COUNT(*) as cnt FROM warm_pool WHERE status = 'warm'", []);
+        return row ? parseInt(row.cnt) : 0;
     },
 
-    findAll() {
+    async findAll() {
         return queryAll(
             `SELECT wp.*, c.container_name, c.container_ip, c.status as container_status
              FROM warm_pool wp
@@ -354,44 +316,43 @@ const warmPool = {
         );
     },
 
-    deleteByContainer(containerId) {
-        run('DELETE FROM warm_pool WHERE container_id = ?', [containerId]);
+    async deleteByContainer(containerId) {
+        await run('DELETE FROM warm_pool WHERE container_id = $1', [containerId]);
     },
 
-    findByContainer(containerId) {
-        return queryOne('SELECT * FROM warm_pool WHERE container_id = ?', [containerId]);
+    async findByContainer(containerId) {
+        return queryOne('SELECT * FROM warm_pool WHERE container_id = $1', [containerId]);
     },
 
-    markWarm(containerId) {
-        run(`UPDATE warm_pool SET status = 'warm', claimed_at = NULL WHERE container_id = ?`, [containerId]);
-        // Also update the container record back to paused
-        run(`UPDATE containers SET status = 'paused' WHERE id = ?`, [containerId]);
+    async markWarm(containerId) {
+        await run(`UPDATE warm_pool SET status = 'warm', claimed_at = NULL WHERE container_id = $1`, [containerId]);
+        await run(`UPDATE containers SET status = 'paused' WHERE id = $1`, [containerId]);
     },
 
-    removeByFunctionId(functionId) {
-        run('DELETE FROM warm_pool WHERE function_id = ?', [functionId]);
+    async removeByFunctionId(functionId) {
+        await run('DELETE FROM warm_pool WHERE function_id = $1', [functionId]);
     },
 
-    removeByWorkerId(workerId) {
-        run('DELETE FROM warm_pool WHERE worker_id = ?', [workerId]);
+    async removeByWorkerId(workerId) {
+        await run('DELETE FROM warm_pool WHERE worker_id = $1', [workerId]);
     },
 };
 
 // ─── events ───────────────────────────────────────────────────────────────────
 
 const events = {
-    insert(e) {
+    async insert(e) {
         const { sql: s, values } = namedToPositional(
             `INSERT INTO worker_events (worker_id, event_type, message)
              VALUES (@worker_id, @event_type, @message)`,
             e
         );
-        run(s, values);
+        await run(s, values);
     },
 
-    findByWorker(workerId) {
+    async findByWorker(workerId) {
         return queryAll(
-            'SELECT * FROM worker_events WHERE worker_id = ? ORDER BY created_at DESC LIMIT 50',
+            'SELECT * FROM worker_events WHERE worker_id = $1 ORDER BY created_at DESC LIMIT 50',
             [workerId]
         );
     },
@@ -400,46 +361,45 @@ const events = {
 // ─── functions ────────────────────────────────────────────────────────────────
 
 const functions = {
-    insert(f) {
+    async insert(f) {
         const { sql: s, values } = namedToPositional(
             `INSERT INTO functions (id, name, image, region, agent_cmd, agent_port, env_vars, memory_limit, cpu_limit, storage_limit, max_containers, warm_count, status, auth_policy)
              VALUES (@id, @name, @image, @region, @agent_cmd, @agent_port, @env_vars, @memory_limit, @cpu_limit, @storage_limit, @max_containers, @warm_count, @status, @auth_policy)`,
             f
         );
-        run(s, values);
+        await run(s, values);
     },
 
-    findAll() {
+    async findAll() {
         return queryAll('SELECT * FROM functions ORDER BY created_at DESC');
     },
 
-    findById(id) {
-        return queryOne('SELECT * FROM functions WHERE id = ?', [id]);
+    async findById(id) {
+        return queryOne('SELECT * FROM functions WHERE id = $1', [id]);
     },
 
-    findByNameAndRegion(name, region) {
-        return queryOne('SELECT * FROM functions WHERE name = ? AND region = ?', [name, region]);
+    async findByNameAndRegion(name, region) {
+        return queryOne('SELECT * FROM functions WHERE name = $1 AND region = $2', [name, region]);
     },
 
-    updateStatus(id, status) {
-        run(`UPDATE functions SET status = ?, updated_at = datetime('now') WHERE id = ?`, [status, id]);
+    async updateStatus(id, status) {
+        await run(`UPDATE functions SET status = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2`, [status, id]);
     },
 
-    update(id, fields) {
-        // Atomic update of function fields — only updates provided fields (PostgreSQL-compatible)
-        run(
+    async update(id, fields) {
+        await run(
             `UPDATE functions SET
-                image = COALESCE(?, image),
-                agent_cmd = COALESCE(?, agent_cmd),
-                agent_port = COALESCE(?, agent_port),
-                env_vars = COALESCE(?, env_vars),
-                memory_limit = COALESCE(?, memory_limit),
-                cpu_limit = COALESCE(?, cpu_limit),
-                storage_limit = COALESCE(?, storage_limit),
-                max_containers = COALESCE(?, max_containers),
-                warm_count = COALESCE(?, warm_count),
-                updated_at = datetime('now')
-             WHERE id = ?`,
+                image = COALESCE($1, image),
+                agent_cmd = COALESCE($2, agent_cmd),
+                agent_port = COALESCE($3, agent_port),
+                env_vars = COALESCE($4, env_vars),
+                memory_limit = COALESCE($5, memory_limit),
+                cpu_limit = COALESCE($6, cpu_limit),
+                storage_limit = COALESCE($7, storage_limit),
+                max_containers = COALESCE($8, max_containers),
+                warm_count = COALESCE($9, warm_count),
+                updated_at = CURRENT_TIMESTAMP
+             WHERE id = $10`,
             [
                 fields.image || null,
                 fields.agent_cmd || null,
@@ -455,48 +415,83 @@ const functions = {
         );
     },
 
-    delete(id) {
-        run('DELETE FROM functions WHERE id = ?', [id]);
+    async delete(id) {
+        await run('DELETE FROM functions WHERE id = $1', [id]);
     },
 
-    deleteById(id) {
-        run('DELETE FROM functions WHERE id = ?', [id]);
+    async deleteById(id) {
+        await run('DELETE FROM functions WHERE id = $1', [id]);
     },
 };
 
 // ─── api_keys ─────────────────────────────────────────────────────────────────
 
 const apiKeys = {
-    insert(k) {
+    async insert(k) {
         const { sql: s, values } = namedToPositional(
             `INSERT INTO api_keys (id, key, function_id, status)
              VALUES (@id, @key, @function_id, @status)`,
             k
         );
-        run(s, values);
+        await run(s, values);
     },
 
-    findByKey(key) {
-        return queryOne('SELECT * FROM api_keys WHERE key = ? AND status = "active"', [key]);
+    async findByKey(key) {
+        return queryOne("SELECT * FROM api_keys WHERE key = $1 AND status = 'active'", [key]);
     },
 
-    findByFunction(functionId) {
-        return queryAll('SELECT * FROM api_keys WHERE function_id = ?', [functionId]);
+    async findByFunction(functionId) {
+        return queryAll('SELECT * FROM api_keys WHERE function_id = $1', [functionId]);
+    },
+
+    async findByKeyAndFunction(key, functionId) {
+        return queryOne("SELECT * FROM api_keys WHERE key = $1 AND function_id = $2 AND status = 'active'", [key, functionId]);
     },
 };
 
+// ─── invocations ──────────────────────────────────────────────────────────────
+
 const invocations = {
-    insert(inv) {
+    async insert(inv) {
         const { sql: s, values } = namedToPositional(
             `INSERT INTO invocations (id, function_id, container_id, status_code, latency_ms, request_method, request_path)
              VALUES (@id, @function_id, @container_id, @status_code, @latency_ms, @request_method, @request_path)`,
             inv
         );
-        run(s, values);
+        await run(s, values);
     },
-    findByFunction(functionId) {
-        return queryAll('SELECT * FROM invocations WHERE function_id = ? ORDER BY created_at DESC', [functionId]);
-    }
+
+    async findByFunction(functionId) {
+        return queryAll('SELECT * FROM invocations WHERE function_id = $1 ORDER BY created_at DESC', [functionId]);
+    },
+
+    async insertBatch(items) {
+        const client = await pool.connect();
+        try {
+            await client.query('BEGIN');
+            for (const item of items) {
+                await client.query(
+                    `INSERT INTO invocations (id, function_id, container_id, status_code, latency_ms, request_method, request_path)
+                     VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+                    [
+                        item.id,
+                        item.function_id,
+                        item.container_id || null,
+                        item.status_code || 200,
+                        item.latency_ms || 0,
+                        item.request_method || 'GET',
+                        item.request_path || '/'
+                    ]
+                );
+            }
+            await client.query('COMMIT');
+        } catch (err) {
+            await client.query('ROLLBACK').catch(() => {});
+            throw err;
+        } finally {
+            client.release();
+        }
+    },
 };
 
-module.exports = { initDb, getDb, workers, containers, warmPool, events, functions, apiKeys, invocations };
+module.exports = { initDb, getDb, queryAll, queryOne, run, workers, containers, warmPool, events, functions, apiKeys, invocations };

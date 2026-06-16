@@ -121,7 +121,7 @@ publicApp.use((req, res, next) => {
 const functionLimiter = rateLimit({
     windowMs: 1000,
     max: parseInt(process.env.FUNCTION_RATE_LIMIT) || 50,
-    keyGenerator: (req) => req.functionName || req.ip,
+    keyGenerator: (req) => req.functionName || 'unknown',
     handler: (req, res) => {
         rateLimited.labels('function').inc();
         res.status(429).json({ error: 'Function rate limit exceeded', request_id: req.requestId });
@@ -180,7 +180,7 @@ const INTERNAL_PORT = parseInt(process.env.INTERNAL_PORT) || 3003;
     // Load all functions into cache on startup so first requests are cache hits.
     try {
         const FUNCTION_CACHE_TTL = parseInt(process.env.FUNCTION_CACHE_TTL) || 3600;
-        const allFunctions = functionsDb.findAll();
+        const allFunctions = await functionsDb.findAll();
         for (const fn of allFunctions) {
             await cache.set(`fn:${fn.name}`, fn, FUNCTION_CACHE_TTL);
         }
@@ -195,10 +195,10 @@ const INTERNAL_PORT = parseInt(process.env.INTERNAL_PORT) || 3003;
     // restart are cache hits (avoid ~5ms DB query penalty on first request).
     try {
         const CONTAINER_CACHE_TTL = parseInt(process.env.CONTAINER_CACHE_TTL) || 300;
-        const allFunctions = functionsDb.findAll();
+        const allFunctions = await functionsDb.findAll();
         let warmedContainers = 0;
         for (const fn of allFunctions) {
-            const running = containersDb.findAllRunningByFunction(fn.id);
+            const running = await containersDb.findAllRunningByFunction(fn.id);
             if (running.length > 0) {
                 const containerEntries = running
                     .filter(c => c.container_ip || (c.metadata && (() => { try { return JSON.parse(c.metadata).host_ip; } catch(_) { return null; } })()))

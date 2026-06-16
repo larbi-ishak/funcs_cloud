@@ -18,15 +18,6 @@ const workerApiClient = axios.create({
 });
 
 // ─── POST /init ───────────────────────────────────────────────────────────────
-/**
- * Register and validate a new Worker VM.
- *
- * Body: { ip, username, password, ssh_port?, provision? }
- *
- * provision (boolean, optional):
- *   true  → run Ansible to install the full stack first, then validate.
- *   false → assume the worker is already set up; validate only (default).
- */
 router.post('/init', async (req, res) => {
     const { ip, username, password, ssh_port, provision = false } = req.body;
 
@@ -37,32 +28,22 @@ router.post('/init', async (req, res) => {
     }
 
     try {
-        // ── Optional: run Ansible provisioning first ─────────────────────────
         if (provision) {
             logger.info(`Provision flag set — running Ansible on worker ${ip}`);
             await provisionWorker({ ip, username, password, ssh_port });
         }
 
-        // ── Validate + register worker in DB ─────────────────────────────────
         const worker = await initWorker(req.body);
         return res.status(201).json({ success: true, worker, provisioned: provision });
 
     } catch (err) {
         if (err instanceof ProvisionError) {
             logger.error(`Ansible provisioning failed [${err.code}]: ${err.message}`);
-            return res.status(502).json({
-                error: err.message,
-                code: err.code,
-                stage: 'provision',
-            });
+            return res.status(502).json({ error: err.message, code: err.code, stage: 'provision' });
         }
         if (err instanceof InitError) {
             logger.warn(`Worker validation failed [${err.code}]: ${err.message}`);
-            return res.status(422).json({
-                error: err.message,
-                code: err.code,
-                stage: 'validate',
-            });
+            return res.status(422).json({ error: err.message, code: err.code, stage: 'validate' });
         }
         logger.error(`Worker init error: ${err.message}`);
         return res.status(500).json({ error: 'Internal server error' });
@@ -70,21 +51,6 @@ router.post('/init', async (req, res) => {
 });
 
 // ─── POST /provision/stream ───────────────────────────────────────────────────
-/**
- * Provision a worker via Ansible with live log streaming (Server-Sent Events).
- *
- * Body: { ip, username, password, ssh_port? }
- *
- * The client receives a stream of SSE events:
- *   event: log    → one line of Ansible output
- *   event: done   → worker registered, data = { worker }
- *   event: error  → provisioning failed, data = { error, code, stage }
- *
- * Example (curl):
- *   curl -N -X POST http://localhost:3002/provision/stream \
- *        -H 'Content-Type: application/json' \
- *        -d '{"ip":"1.2.3.4","username":"root","password":"secret"}'
- */
 router.post('/provision/stream', async (req, res) => {
     const { ip, username, password, ssh_port } = req.body;
 
@@ -92,7 +58,6 @@ router.post('/provision/stream', async (req, res) => {
         return res.status(400).json({ error: 'Missing required fields: ip, username, password' });
     }
 
-    // ── Set up SSE headers ───────────────────────────────────────────────────
     res.setHeader('Content-Type', 'text/event-stream');
     res.setHeader('Cache-Control', 'no-cache');
     res.setHeader('Connection', 'keep-alive');
@@ -103,7 +68,6 @@ router.post('/provision/stream', async (req, res) => {
     };
 
     try {
-        // ── Stream Ansible output line by line ───────────────────────────────
         send('log', { line: `🚀 Starting Ansible provisioning for ${ip}...` });
 
         await provisionWorker({
@@ -111,7 +75,6 @@ router.post('/provision/stream', async (req, res) => {
             onLine: (line) => send('log', { line }),
         });
 
-        // ── Validate + register in DB ────────────────────────────────────────
         send('log', { line: '✅ Provisioning complete — validating worker...' });
         const worker = await initWorker({ ip, username, password, ssh_port });
 
@@ -131,17 +94,17 @@ router.post('/provision/stream', async (req, res) => {
 });
 
 // ─── GET /workers ─────────────────────────────────────────────────────────────
-router.get('/workers', (req, res) => {
-    const all = workers.findAll().map(sanitize);
+router.get('/workers', async (req, res) => {
+    const all = (await workers.findAll()).map(sanitize);
     return res.json({ workers: all, total: all.length });
 });
 
 // ─── GET /workers/:id ─────────────────────────────────────────────────────────
-router.get('/workers/:id', (req, res) => {
-    const worker = workers.findById(req.params.id);
+router.get('/workers/:id', async (req, res) => {
+    const worker = await workers.findById(req.params.id);
     if (!worker) return res.status(404).json({ error: 'Worker not found' });
 
-    const workerEvents = events.findByWorker(req.params.id);
+    const workerEvents = await events.findByWorker(req.params.id);
 
     return res.json({
         worker: sanitize(worker),
@@ -151,7 +114,7 @@ router.get('/workers/:id', (req, res) => {
 
 // ─── POST /workers/:id/check ──────────────────────────────────────────────────
 router.post('/workers/:id/check', async (req, res) => {
-    const worker = workers.findById(req.params.id);
+    const worker = await workers.findById(req.params.id);
     if (!worker) return res.status(404).json({ error: 'Worker not found' });
 
     try {
@@ -163,8 +126,8 @@ router.post('/workers/:id/check', async (req, res) => {
 });
 
 // ─── POST /workers/:id/retire ─────────────────────────────────────────────────
-router.post('/workers/:id/retire', (req, res) => {
-    const worker = workers.findById(req.params.id);
+router.post('/workers/:id/retire', async (req, res) => {
+    const worker = await workers.findById(req.params.id);
     if (!worker) return res.status(404).json({ error: 'Worker not found' });
 
     try {
@@ -176,12 +139,8 @@ router.post('/workers/:id/retire', (req, res) => {
 });
 
 // ─── POST /workers/:id/retry ──────────────────────────────────────────────────
-/**
- * Reset a faulty/retired worker's failure count and immediately retry health check.
- * Use after manually fixing a worker (e.g., rebooting the VM).
- */
 router.post('/workers/:id/retry', async (req, res) => {
-    const worker = workers.findById(req.params.id);
+    const worker = await workers.findById(req.params.id);
     if (!worker) return res.status(404).json({ error: 'Worker not found' });
 
     try {
@@ -193,21 +152,18 @@ router.post('/workers/:id/retry', async (req, res) => {
 });
 
 // ─── GET /workers/:id/containers ─────────────────────────────────────────────
-/**
- * List all containers for a worker, enriched with function name and live status.
- * Also calls Worker API /ps to get actual container status from the worker.
- */
 router.get('/workers/:id/containers', async (req, res) => {
-    const worker = workers.findById(req.params.id);
+    const worker = await workers.findById(req.params.id);
     if (!worker) return res.status(404).json({ error: 'Worker not found' });
 
     // Get containers from DB
-    const dbContainers = containers.findAll().filter(c => c.worker_id === req.params.id);
+    const dbContainers = (await containers.findAll()).filter(c => c.worker_id === req.params.id);
 
     // Enrich with function name
-    const enriched = dbContainers.map(c => {
-        const fn = c.function_id ? functions.findById(c.function_id) : null;
-        return {
+    const enriched = [];
+    for (const c of dbContainers) {
+        const fn = c.function_id ? await functions.findById(c.function_id) : null;
+        enriched.push({
             id: c.id,
             container_name: c.container_name,
             status: c.status,
@@ -219,10 +175,10 @@ router.get('/workers/:id/containers', async (req, res) => {
             function_id: c.function_id,
             started_at: c.started_at,
             stopped_at: c.stopped_at,
-        };
-    });
+        });
+    }
 
-    // Try to get live status + container stats from Worker API
+    // Try to get live status from Worker API
     let liveContainers = [];
     try {
         const psRes = await workerApiClient.get(`http://${worker.ip}:${WORKER_API_PORT}/ps`).catch(() => null);
@@ -231,7 +187,7 @@ router.get('/workers/:id/containers', async (req, res) => {
         // Worker API unavailable — return DB data only
     }
 
-    // Merge live status + stats into DB records
+    // Merge live status into DB records
     const liveMap = new Map(liveContainers.map(c => [c.name, c.status]));
     for (const c of enriched) {
         c.live_status = liveMap.get(c.container_name) || 'not_found';
@@ -247,11 +203,8 @@ router.get('/workers/:id/containers', async (req, res) => {
 });
 
 // ─── GET /workers/:id/stats ──────────────────────────────────────────────────
-/**
- * Get real-time resource stats (RAM, CPU, disk) from a worker via Worker API.
- */
 router.get('/workers/:id/stats', async (req, res) => {
-    const worker = workers.findById(req.params.id);
+    const worker = await workers.findById(req.params.id);
     if (!worker) return res.status(404).json({ error: 'Worker not found' });
 
     try {
@@ -271,11 +224,8 @@ router.get('/workers/:id/stats', async (req, res) => {
 });
 
 // ─── GET /workers/ksm-stats ──────────────────────────────────────────────────
-/**
- * Get KSM deduplication stats from all healthy workers.
- */
 router.get('/workers/ksm-stats', async (req, res) => {
-    const allWorkers = workers.findAll().filter(w => w.status === 'healthy');
+    const allWorkers = (await workers.findAll()).filter(w => w.status === 'healthy');
     const results = [];
 
     for (const worker of allWorkers) {
@@ -293,17 +243,17 @@ router.get('/workers/ksm-stats', async (req, res) => {
 });
 
 // ─── DELETE /workers/:id ──────────────────────────────────────────────────────
-router.delete('/workers/:id', (req, res) => {
-    const worker = workers.findById(req.params.id);
+router.delete('/workers/:id', async (req, res) => {
+    const worker = await workers.findById(req.params.id);
     if (!worker) return res.status(404).json({ error: 'Worker not found' });
 
     // Cascade: remove warm pool entries and containers for this worker
-    const workerContainers = containers.findByWorker(req.params.id);
-    warmPool.removeByWorkerId(req.params.id);
-    containers.removeByWorkerId(req.params.id);
+    const workerContainers = await containers.findByWorker(req.params.id);
+    await warmPool.removeByWorkerId(req.params.id);
+    await containers.removeByWorkerId(req.params.id);
     logger.info(`Worker ${req.params.id}: cleaned up ${workerContainers.length} container(s) and warm pool entries`);
 
-    workers.delete(req.params.id);
+    await workers.delete(req.params.id);
     logger.info(`Worker ${req.params.id} deleted`);
     return res.json({ success: true, containers_removed: workerContainers.length });
 });

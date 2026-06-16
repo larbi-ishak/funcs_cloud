@@ -83,7 +83,7 @@ router.post('/functions/deploy', upload.array('files'), async (req, res) => {
         // ── 1. Pick a worker for the build ────────────────────────────────────
         let worker;
         try {
-            worker = pickWorker();
+            worker = await pickWorker();
         } catch (err) {
             log(`❌ No healthy workers available: ${err.message}`, 'error');
             return finish(false, { error: err.message });
@@ -138,10 +138,10 @@ router.post('/functions/deploy', upload.array('files'), async (req, res) => {
         };
         const agentCmd = runtimeCmds[runtime] || `python3 /function/${entry_point}`;
 
-        let func = functions.findByNameAndRegion(functionName, region);
+        let func = await functions.findByNameAndRegion(functionName, region);
         if (!func) {
             const funcId = uuidv4();
-            functions.insert({
+            await functions.insert({
                 id: funcId,
                 name: functionName,
                 image: buildResult.image,
@@ -157,12 +157,12 @@ router.post('/functions/deploy', upload.array('files'), async (req, res) => {
                 status: 'active',
                 auth_policy: 'public',
             });
-            func = functions.findById(funcId);
+            func = await functions.findById(funcId);
             log(`📦 Function '${functionName}' registered (id: ${func.id})`, 'step');
         } else {
             // Update function record with new image and settings
             log(`📦 Function '${functionName}' already exists — updating image`, 'step');
-            functions.update(func.id, {
+            await functions.update(func.id, {
                 image: buildResult.image,
                 agent_cmd: agentCmd,
                 agent_port: agentPort,
@@ -171,10 +171,10 @@ router.post('/functions/deploy', upload.array('files'), async (req, res) => {
                 cpu_limit: cpu_limit ? parseFloat(cpu_limit) : null,
                 warm_count: targetWarm,
             });
-            func = functions.findById(func.id); // Refresh from DB
+            func = await functions.findById(func.id); // Refresh from DB
 
             // Stop old containers running the previous image
-            const oldContainers = containers.findAll().filter(
+            const oldContainers = (await containers.findAll()).filter(
                 c => c.function_id === func.id && c.status !== 'stopped' && c.status !== 'failed'
             );
             if (oldContainers.length > 0) {
@@ -182,7 +182,7 @@ router.post('/functions/deploy', upload.array('files'), async (req, res) => {
                 for (const c of oldContainers) {
                     try { await stopContainer(c.id); } catch (_) { /* best effort */ }
                 }
-                warmPool.removeByFunctionId(func.id);
+                await warmPool.removeByFunctionId(func.id);
             }
 
             // Invalidate gateway cache so it picks up the new image + new function ID
@@ -212,7 +212,7 @@ router.post('/functions/deploy', upload.array('files'), async (req, res) => {
                     pause_after: true,
                 });
 
-                warmPool.insert({
+                await warmPool.insert({
                     container_id: container.id,
                     worker_id: worker.id,
                     function_id: func.id,
@@ -250,12 +250,13 @@ router.post('/functions/deploy', upload.array('files'), async (req, res) => {
  * GET /functions/deploy/status
  * Returns the current warm pool status for all functions (for dashboard polling).
  */
-router.get('/functions/deploy/status', (req, res) => {
-    const allFunctions = functions.findAll();
+router.get('/functions/deploy/status', async (req, res) => {
+    const allFunctions = await functions.findAll();
+    const allWarmEntries = await warmPool.findAll();
 
     const result = allFunctions.map(f => {
-        const warm = warmPool.findAll().filter(e => e.function_id === f.id && e.status === 'warm');
-        const claimed = warmPool.findAll().filter(e => e.function_id === f.id && e.status === 'claimed');
+        const warm = allWarmEntries.filter(e => e.function_id === f.id && e.status === 'warm');
+        const claimed = allWarmEntries.filter(e => e.function_id === f.id && e.status === 'claimed');
         return {
             id: f.id,
             name: f.name,
@@ -280,14 +281,14 @@ router.get('/functions/deploy/status', (req, res) => {
  *  - purges warm_pool entries and the function record from SQLite
  */
 router.delete('/functions/:id', async (req, res) => {
-    const func = functions.findById(req.params.id);
+    const func = await functions.findById(req.params.id);
     if (!func) return res.status(404).json({ error: 'Function not found' });
 
     const log = (msg) => logger.info(`[delete:${func.name}] ${msg}`);
 
     try {
         // Gather all container names for this function
-        const allContainers = containers.findAll().filter(c => c.function_id === func.id);
+        const allContainers = (await containers.findAll()).filter(c => c.function_id === func.id);
         const containerNames = allContainers.map(c => c.container_name);
 
         log(`Stopping ${containerNames.length} container(s)...`);
@@ -302,11 +303,11 @@ router.delete('/functions/:id', async (req, res) => {
         let worker = null;
         if (allContainers.length > 0) {
             const { workers } = require('../db/database');
-            worker = workers.findById(allContainers[0].worker_id);
+            worker = await workers.findById(allContainers[0].worker_id);
         }
         if (!worker) {
             // Try picking any registered worker
-            try { worker = pickWorker(); } catch (_) {}
+            try { worker = await pickWorker(); } catch (_) {}
         }
 
         if (worker) {
@@ -316,10 +317,10 @@ router.delete('/functions/:id', async (req, res) => {
         }
 
         // Purge warm pool entries
-        warmPool.removeByFunctionId(func.id);
+        await warmPool.removeByFunctionId(func.id);
 
         // Purge the function record
-        functions.deleteById(func.id);
+        await functions.deleteById(func.id);
 
         // Invalidate gateway cache so it stops routing to this function
         // and forgets the old function ID (prevents stale cache on re-deploy)

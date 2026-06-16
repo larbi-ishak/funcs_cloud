@@ -117,7 +117,7 @@ export default async function containerStateCheck(req, res, next) {
 
         // ── Step 2: Query DB for ALL running containers ──────────────────────
         const tDb = performance.now();
-        const runningContainers = containers.findAllRunningByFunction(functionData.id);
+        const runningContainers = await containers.findAllRunningByFunction(functionData.id);
         const dbElapsed = +(performance.now() - tDb).toFixed(2);
 
         if (runningContainers.length > 0) {

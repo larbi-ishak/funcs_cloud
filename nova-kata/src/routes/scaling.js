@@ -18,8 +18,8 @@ router.get('/scaling/regions', (req, res) => {
 /**
  * Returns current cluster load metrics and scaling state.
  */
-router.get('/scaling/metrics', (req, res) => {
-    res.json(getMetrics());
+router.get('/scaling/metrics', async (req, res) => {
+    res.json(await getMetrics());
 });
 
 // ─── POST /scaling/scale-out ──────────────────────────────────────────────────
